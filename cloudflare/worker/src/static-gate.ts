@@ -43,6 +43,14 @@ const LOGOUT_PATH = '/__gate/logout'
  * origin and lets the Worker make the outbound call instead.
  */
 const PROXY_PATH = '/__proxy/'
+
+/**
+ * Header every relay answer carries, success or refusal. The browser-side
+ * wrapper (`webworker-runtime/src/fetch-relay.ts`) keys off it to tell "this is
+ * the endpoint's real answer" from "this deployment has no relay", so a
+ * deployment without one keeps its direct cross-origin requests.
+ */
+const PROXY_MARKER = 'x-dsh-relay'
 const SESSION_SECONDS = 60 * 60 * 24 * 30
 const LOCK_AFTER = 10
 const LOCK_WINDOW_MS = 60_000
@@ -344,6 +352,7 @@ async function handleProxy(request: Request, url: URL, env: Env): Promise<Respon
     return new Response(null, {
       status: 204,
       headers: {
+        [PROXY_MARKER]: '1',
         'access-control-allow-origin': '*',
         'access-control-allow-headers': FORWARDED_HEADERS.join(', '),
         'access-control-allow-methods': 'GET, POST, OPTIONS',
@@ -371,6 +380,7 @@ async function handleProxy(request: Request, url: URL, env: Env): Promise<Respon
   }
   const out = new Headers(response.headers)
   for (const name of DROPPED_HEADERS) out.delete(name)
+  out.set(PROXY_MARKER, '1')
   // The upstream body always comes back, including on GET: a model listing is
   // an ordinary GET whose body is the answer. `bodyless` describes the request.
   return new Response(response.body, {
@@ -389,7 +399,11 @@ async function handleProxy(request: Request, url: URL, env: Env): Promise<Respon
 function proxyError(status: number, message: string): Response {
   return new Response(JSON.stringify({ error: 'relay', message }), {
     status,
-    headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
+    headers: {
+      [PROXY_MARKER]: '1',
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store',
+    },
   })
 }
 

@@ -25,7 +25,11 @@ import { installCryptoGlobals } from './node/globals/crypto.ts'
 import { isShellStartFrame } from './shell/process/protocol.ts'
 import { runShellProcess } from './shell/process/host.ts'
 import { installPiAi } from './pi-ai-install.ts'
+import { installFetchRelay } from './fetch-relay.ts'
 
+// Before anything can reach a provider: the wrapper replaces `globalThis.fetch`
+// and the provider SDKs look it up when they build a client.
+installFetchRelay()
 // Before the timer globals, so the wrappers close over the patched platform.
 installAsyncContextHooks()
 installTimerGlobals()

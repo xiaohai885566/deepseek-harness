@@ -63,9 +63,18 @@ npx wrangler@4 secret put DSH_SITE_PASSWORD -c cloudflare/static/wrangler.jsonc
 
 ### 模型端点中转 `/__proxy/`
 
-浏览器版的所有模型请求都是**页面发出的跨域 `fetch`**。所以端点不返回 CORS 头、或者端点是 `http://` 而页面是 `https://`，都会失败——OpenAI SDK 只会报一句 `Connection error.`，看不出原因。
+浏览器版的所有模型请求都是**页面发出的跨域 `fetch`**。所以端点不返回 CORS 头、或者端点是 `http://` 而页面是 `https://`，都会失败——浏览器只给一个不透明的 `TypeError: Failed to fetch`，SDK 把它显示成一句 `Connection error.`，没有 host、没有状态码、没有原因。
 
-把 baseURL 换成同源中转即可，Worker 替浏览器发起外呼：
+这个部署自带同源中转，而且**自动生效**：worker 里的 `globalThis.fetch` 被包了一层（`webworker-runtime/src/fetch-relay.ts`），跨域请求自动改走 `<本站>/__proxy/<原 URL>`，由 Worker 替浏览器外呼。baseURL 照填端点原样，不用改。
+
+```
+baseURL: https://api.example.com/v1          ← 照常填
+实际请求: https://<本站>/__proxy/https://api.example.com/v1/chat/completions
+```
+
+判断中转是否生效：中转的每个响应都带 `x-dsh-relay: 1`。没有这个头，说明部署里没有中转，wrapper 会把原请求再发一次（每个进程只多这一次），行为和以前一样。
+
+也可以手动指定，两者等价：
 
 ```
 https://<你的部署域名>/__proxy/https://api.example.com/v1

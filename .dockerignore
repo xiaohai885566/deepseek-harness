@@ -1,0 +1,16 @@
+# Build context for cloudflare/Dockerfile: the repository root.
+# Keep every workspace package (packages/*/*, apps/*, vendor/*, benchmarks,
+# website, python/sdk-runtime) because pnpm resolves the whole workspace.
+.git
+.github
+.gitlab-ci.yml
+**/node_modules
+**/lib
+**/dist
+apps/web/dist
+coverage
+**/.turbo
+**/.cache
+**/*.tsbuildinfo
+**/.sessions
+**/.storages

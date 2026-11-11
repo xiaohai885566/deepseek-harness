@@ -1,0 +1,56 @@
+// Cloudflare deployment of DeepSeek Harness.
+//
+// One Worker, one Container instance. The Worker is a router: it starts the
+// container on first request, waits for the harness listener to announce
+// itself, then forwards HTTP and WebSocket traffic unchanged. The container runs
+// the real `dsh web` host, so tools, shell, sessions, and the workspace behave
+// exactly as they do locally.
+//
+// Deploy: `npx wrangler deploy` from the repository root (Docker must be running).
+// Secrets: `npx wrangler secret put DEEPSEEK_API_KEY` (and optionally DSH_BASIC_AUTH).
+{
+  "name": "deepseek-harness",
+  "main": "cloudflare/worker/src/index.ts",
+  "compatibility_date": "2026-11-10",
+  "observability": {
+    "enabled": true
+  },
+  "containers": [
+    {
+      "class_name": "DshContainer",
+      "scheduling_policy": "durable_object",
+      "max_instances": 1,
+      "images": {
+        "base": {
+          // The build context is the repository root: the harness composes every
+          // workspace package, so the image cannot be built from cloudflare/ alone.
+          "dockerfile": "cloudflare/Dockerfile",
+          "build_context": "."
+        }
+      }
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "DSH",
+        "class_name": "DshContainer"
+      }
+    ]
+  },
+  "exports": {
+    "DshContainer": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    }
+  },
+  "vars": {
+    // standard-2 = 1 vCPU / 6 GiB / 12 GB disk. The image plus a pnpm workspace
+    // does not fit standard-1's 8 GB disk, and the harness compiles nothing at
+    // runtime, so one vCPU is enough.
+    "DSH_INSTANCE": "standard-2",
+    // Two hours of idleness before the platform stops the container. Raise it to
+    // keep sessions resident, lower it to cut idle billing.
+    "DSH_IDLE_TIMEOUT_MS": "7200000"
+  }
+}

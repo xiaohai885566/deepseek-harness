@@ -12,7 +12,8 @@
  * stale copy of either leaves a profile whose patch layer and bundle list
  * disagree with the code the deployment just shipped. Mirrored: the user patch
  * layer (`home/profiles/<name>/cordis.patch.yml`, where settings and model
- * routes live), the session logs under `home/sessions`, and `workspace/`.
+ * routes live), the session logs under `home/sessions`, the durable KV root
+ * `home/storages` that holds the workspace registry, and `workspace/`.
  *
  * Failures never reach the caller of a write: the in-memory mutation has already
  * committed by the time the sink sees it, so the contract is to report once and
@@ -124,6 +125,9 @@ export class IndexedDbMutationSink implements VfsMutationSink {
     this.prefixes = [
       join(this.root, 'workspace'),
       join(this.root, IMAGE_HOME_DIRECTORY, 'sessions'),
+      // Durable KV: the workspace registry lives here, so a reload would
+      // otherwise forget every workspace the user created.
+      join(this.root, IMAGE_HOME_DIRECTORY, 'storages'),
     ]
     const escaped = join(this.root, IMAGE_HOME_DIRECTORY, 'profiles').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
     this.userPatch = new RegExp(`^${escaped}/[^/]+/cordis\\.patch\\.yml$`)

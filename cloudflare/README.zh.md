@@ -99,7 +99,7 @@ https://<你的部署域名>/__proxy/https://api.example.com/v1
 
 | 项 | 行为 |
 | --- | --- |
-| 保存范围 | 白名单：`home/profiles/<名字>/cordis.patch.yml`（设置与模型路由）、`home/sessions/`（会话）、`workspace/` |
+| 保存范围 | 白名单：`home/profiles/<名字>/cordis.patch.yml`（设置与模型路由）、`home/sessions/`（会话）、`home/storages/`（工作区登记表等持久 KV）、`workspace/` |
 | 不保存 | 其余全部。`home/` 里还放着**镜像自己的**引导状态——平台 patch `home/cordis.patch.yml` 和 profile 清单 `home/profiles/<名字>/package.json`——存了会在下次部署后盖住新版本，profile 的 patch 层和 bundle 列表就会跟新代码对不上 |
 | 写入时机 | 每次写文件后一个微任务内落库，一次事务一批；`flush()` 可等待 |
 | 恢复时机 | 镜像和 overlay 挂载完、profile 读取**之前** |

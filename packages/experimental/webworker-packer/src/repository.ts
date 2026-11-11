@@ -124,13 +124,39 @@ export function profileRoster(repoRoot: string, profile: string): ProfileRoster 
  */
 export function platformHomePatch(repoRoot: string, profile: string): PatchOptions[] {
   const composed: unknown = composeEntries([shippedTemplate(profile).bundles.flatMap(bundle => bundlePatches(repoRoot, bundle))])
-  return Object.entries(PLATFORM_ENTRY_CONFIG).flatMap(([id, fields]) => {
+  const rows: PatchOptions[] = Object.entries(PLATFORM_ENTRY_CONFIG).flatMap(([id, fields]) => {
     const row = findRow(composed, id)
     if (row === undefined) return []
     const config = typeof row.config === 'object' && row.config !== null && !Array.isArray(row.config) ? row.config : {}
     return [{ id, config: { ...config, ...fields } }]
   })
+  return [...rows, ...PREVIEW_INTERACTION_ROWS.filter(row => row.id === undefined || findRow(composed, row.id) !== undefined)]
 }
+
+/**
+ * Rows pinning a dual-face interaction the adaptive chooser would otherwise
+ * mount at runtime.
+ *
+ * `directory-picker-auto` samples display, SSH launch, and bind host, then
+ * creates both faces as Loader entries. The worker host has no display and no
+ * runtime package resolution to spare, and a failed mount takes the whole
+ * interaction with it — including `ctx.directoryPicker`, which
+ * `workspace-controller` injects, so the workspace surface loses its create
+ * flow. Pinning the browse pair statically mounts the same two faces through
+ * the ordinary config path, which is the mechanism the bundle patch documents
+ * ("Mount -native or -browse directly in an overlay to pin the interaction").
+ * The browse backend works here because its `node:fs` calls land on the VFS.
+ */
+const PREVIEW_INTERACTION_ROWS: readonly PatchOptions[] = [
+  // The chooser's runtime mount would collide with the pinned backend.
+  { id: 'directory-picker', disabled: true },
+  {
+    insert: [
+      { id: 'directory-picker-browse', name: '@deepseek-ai/dsh-host-directory-picker-browse' },
+      { id: 'ui-directory-picker-browse', name: '@deepseek-ai/dsh-client-ui-directory-picker-browse' },
+    ],
+  },
+]
 
 /** Find one Loader row by id, inside group configs too. */
 function findRow(rows: unknown, id: string): { config?: unknown } | undefined {

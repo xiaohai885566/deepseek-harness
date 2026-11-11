@@ -1,0 +1,116 @@
+name: Deploy static preview to Cloudflare
+
+# The browser build needs a full workspace build (the web app consumes built
+# lib products and the packer ships an installed bin), which a 2 vCPU runner
+# does not have the memory for on a laptop-sized box. Runners do.
+#
+# Needs repository secrets:
+#   CLOUDFLARE_API_TOKEN   Workers Scripts:Edit
+#   CLOUDFLARE_ACCOUNT_ID  the account that owns the Worker
+on:
+  workflow_dispatch:
+    inputs:
+      project_name:
+        description: 'Worker name to deploy under'
+        required: false
+        type: string
+        default: deepseek-harness-web
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-cloudflare-static
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@v4.2.0
+        with:
+          version: 11.28.5
+
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: '24'
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      # apps/web consumes workspace packages as built lib products, and
+      # build:preview packs the image through the packer's installed bin, so
+      # neither half exists before the artifact build runs.
+      - name: Build workspace
+        env:
+          CI: 'true'
+          DSH_TELEMETRY_DISABLED: '1'
+        run: pnpm run build
+
+      - name: Build the preview page and pack the VFS image
+        env:
+          DSH_CLIENT_TITLE: DeepSeek Harness
+        run: pnpm --filter @deepseek-ai/dsh-web-frontend run build:preview
+
+      # Sourcemaps carry complete sources and stay off the platform. index.html
+      # cannot boot without a host injecting window.__DSH_BOOT__, so the worker
+      # page becomes the served page.
+      - name: Shape the upload
+        run: |
+          find apps/web/dist -name '*.map' -delete
+          cp apps/web/dist/preview.html apps/web/dist/index.html
+          du -sh apps/web/dist
+          find apps/web/dist -type f | wc -l
+          ls -l apps/web/dist/preview/vfs-image.tar.gz
+          oversize=$(find apps/web/dist -type f -size +25M -print)
+          if [ -n "$oversize" ]; then
+            echo "::error::these files exceed the 25 MiB per-file asset limit: $oversize"
+            exit 1
+          fi
+
+      - name: Deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          npx --yes wrangler@4 deploy -c cloudflare/static/wrangler.jsonc \
+            --name "${{ inputs.project_name || 'deepseek-harness-web' }}"
+
+      - name: Verify the deployment serves the packed image uncompressed
+        run: |
+          url="https://${{ inputs.project_name || 'deepseek-harness-web' }}.${WORKERS_SUBDOMAIN}.workers.dev"
+          echo "deployment: $url"
+          code=000
+          for attempt in 1 2 3 4 5; do
+            code=$(curl -sS -o image.bin -D headers.txt -w '%{http_code}' \
+              -H 'Accept-Encoding: gzip' "$url/preview/vfs-image.tar.gz" || echo 000)
+            echo "attempt $attempt: HTTP $code"
+            [ "$code" = "200" ] && break
+            sleep 10
+          done
+          if [ "$code" != "200" ]; then
+            echo "::error::the packed image URL answered $code, not 200"
+            head -20 headers.txt
+            exit 1
+          fi
+          if grep -qi '^content-encoding:' headers.txt; then
+            echo "::error::the platform compressed an already-compressed image, so the browser worker would inflate a plain tar:"
+            grep -i '^content-encoding:' headers.txt
+            exit 1
+          fi
+          magic=$(head -c 2 image.bin | od -An -tx1 | tr -d ' \n')
+          if [ "$magic" != "1f8b" ]; then
+            echo "::error::image does not start with the gzip magic number: $magic"
+            exit 1
+          fi
+          echo "image served as $(wc -c < image.bin) gzip bytes"
+          echo "### Deployed" >> "$GITHUB_STEP_SUMMARY"
+          echo "$url" >> "$GITHUB_STEP_SUMMARY"
+        env:
+          WORKERS_SUBDOMAIN: xiaohai-dsh

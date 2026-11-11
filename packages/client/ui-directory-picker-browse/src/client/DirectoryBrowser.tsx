@@ -902,10 +902,15 @@ export function DirectoryBrowser({ open, listDirectory, createDirectory, onOpen,
                   onKeyDown={(event) => {
                     if (event.key === 'Enter' && !composingRef.current) {
                       event.preventDefault()
-                      // Trim only detects a blank draft; the Host gets the
-                      // original text — a real directory name may end in
-                      // whitespace, and trimming would list its sibling.
-                      if (pathDraft.trim() !== '') {
+                      // Leading whitespace goes: the Host takes fully
+                      // qualified paths only, so a draft that starts with a
+                      // space can never be one — a paste carrying an indent
+                      // would otherwise come back as "not a fully qualified
+                      // path" with nothing to correct. Trailing text is left
+                      // alone, because a real directory name may end in
+                      // whitespace and trimming would list its sibling.
+                      const submitted = pathDraft.replace(/^\s+/, '')
+                      if (submitted.trim() !== '') {
                         // Success will unmount the still-focused input; park
                         // focus on the returning crumb edit zone (a failure
                         // keeps the editor, so the flag waits until close).
@@ -915,7 +920,7 @@ export function DirectoryBrowser({ open, listDirectory, createDirectory, onOpen,
                         // otherwise supersede this navigation and land the
                         // draft's parent directory instead.
                         previewSuspended.current = true
-                        navigate(pathDraft)
+                        navigate(submitted)
                       }
                     }
                   }}

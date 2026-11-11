@@ -39,6 +39,28 @@ What a free account can run is `cloudflare/static/`: static assets plus the host
 
 To run the real host without paying Cloudflare, `cloudflare/Dockerfile` is a plain image: Koyeb, Render, Fly.io, Hugging Face Spaces, and Google Cloud Run all run the same one. Point the container port at 8080 and set `DEEPSEEK_API_KEY`. The `edge-proxy.mjs` layer is platform-independent; it only needs one listenable port inside the container.
 
+## Access protection
+
+The static deployment is **completely public** by default: an assets-only Worker has no server, so whoever has the URL has every byte. A password gate now sits in front (`cloudflare/worker/src/static-gate.ts`):
+
+| Behaviour | Result |
+| --- | --- |
+| Any page without a session | 302 to `/__gate` (carrying `next`, so login returns there) |
+| Any subresource without a session (JS/CSS/vfs image) | 401 JSON, not 200 |
+| Correct password | 303 plus a `dsh_gate` cookie: `HttpOnly; Secure; SameSite=Lax`, HMAC-SHA256 signed, 30 days, no password inside |
+| Wrong password | 401 with the same page; more than 10 tries locks for 60 seconds (counted per isolate, not globally) |
+| `/__gate/logout` | clears the cookie |
+| Rotating `DSH_SITE_SECRET` | invalidates every issued cookie |
+| Neither secret configured | **fails closed**: every request answers 503 |
+
+Change the password:
+
+```sh
+npx wrangler@4 secret put DSH_SITE_PASSWORD -c cloudflare/static/wrangler.jsonc
+```
+
+The cost: `run_worker_first: true` puts the Worker in front of every request, so assets count against the free 100,000 requests/day too. The gate protects the page, not the model credential, which always lives in the visitor's own browser.
+
 ## Prerequisites
 
 - A Cloudflare account on the **Workers paid plan** (Containers are a paid feature) and its Account ID.

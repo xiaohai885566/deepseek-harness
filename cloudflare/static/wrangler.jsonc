@@ -1,16 +1,23 @@
-// Free-plan deployment: the browser build, served as static assets.
+// Free-plan deployment: the browser build behind a password gate.
 //
 // `pnpm --filter @deepseek-ai/dsh-web-frontend run build:preview` emits a page
 // that boots the host inside a browser Web Worker over an in-memory VFS. There
-// is no server here: no container, no Worker script, no secrets. Each visitor's
-// model credential lives in that visitor's browser.
+// is no harness server here: the Worker in front exists only to gate access, and
+// every authorized request is answered by the asset layer.
 //
 // Deploy: ./cloudflare/static/deploy.sh
+// Secrets: DSH_SITE_PASSWORD (the visitor-facing password) and DSH_SITE_SECRET
+// (the cookie signing key; rotating it ends every session).
 {
   "name": "deepseek-harness-web",
+  "main": "../worker/src/static-gate.ts",
   "compatibility_date": "2026-11-10",
   "assets": {
     "directory": "../../apps/web/dist",
+    "binding": "ASSETS",
+    // The gate must see every path: an unauthenticated visitor who could fetch
+    // an asset directly would have the whole app without the password.
+    "run_worker_first": true,
     // The page is one entry with client-side routing; a missing path should
     // load the app rather than 404.
     "not_found_handling": "single-page-application",

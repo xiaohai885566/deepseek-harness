@@ -39,6 +39,28 @@
 
 要真身又不想给 Cloudflare 付费：`cloudflare/Dockerfile` 是标准镜像，Koyeb / Render / Fly.io / Hugging Face Spaces / Google Cloud Run 都能直接跑同一份，把容器端口设成 8080、环境变量设 `DEEPSEEK_API_KEY` 即可。`edge-proxy.mjs` 那一层与平台无关，只要求容器内能监听一个端口。
 
+## 访问保护
+
+静态版默认是**完全公开**的：assets-only Worker 没有服务端，谁能拿到 URL 谁就拿到全部字节。所以前面挂了一个密码门（`cloudflare/worker/src/static-gate.ts`）：
+
+| 行为 | 结果 |
+| --- | --- |
+| 未登录访问任何页面 | 302 到 `/__gate`（带 `next`，登录后回到原路径） |
+| 未登录抓子资源（JS/CSS/vfs 镜像） | 401 JSON，不是 200 |
+| 密码正确 | 303 + `dsh_gate` cookie：`HttpOnly; Secure; SameSite=Lax`，HMAC-SHA256 签名，30 天有效，cookie 里不含密码 |
+| 密码错误 | 401，同页提示；超过 10 次锁 60 秒（每个 isolate 各自计数，不是全局限流） |
+| `/__gate/logout` | 清 cookie |
+| 轮换 `DSH_SITE_SECRET` | 所有已发 cookie 立刻失效 |
+| 两个 secret 都没配 | **失败关闭**：全部请求 503，不会裸奔 |
+
+换密码：
+
+```sh
+npx wrangler@4 secret put DSH_SITE_PASSWORD -c cloudflare/static/wrangler.jsonc
+```
+
+代价：`run_worker_first: true` 让每个请求都先过 Worker，所以静态资源也计入免费额度（10 万请求/天）。这条门只保护"能不能拿到页面"，模型密钥始终在各访问者自己的浏览器里。
+
 ## 前置条件
 
 - Cloudflare 账号开通 **Workers 付费版**（Containers 属于付费能力），并记下 Account ID。

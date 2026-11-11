@@ -1,12 +1,14 @@
 name: Deploy static preview to Cloudflare
 
 # The browser build needs a full workspace build (the web app consumes built
-# lib products and the packer ships an installed bin), which a 2 vCPU runner
-# does not have the memory for on a laptop-sized box. Runners do.
+# lib products and the packer ships an installed bin), which a small box does
+# not have the memory for. Runners do.
 #
 # Needs repository secrets:
 #   CLOUDFLARE_API_TOKEN   Workers Scripts:Edit
 #   CLOUDFLARE_ACCOUNT_ID  the account that owns the Worker
+#   DSH_SITE_PASSWORD      the visitor-facing password
+#   DSH_SITE_SECRET        cookie signing key; rotating it ends every session
 on:
   workflow_dispatch:
     inputs:
@@ -15,6 +17,11 @@ on:
         required: false
         type: string
         default: deepseek-harness-web
+      workers_subdomain:
+        description: 'workers.dev subdomain the account owns'
+        required: false
+        type: string
+        default: xiaohai-dsh
 
 permissions:
   contents: read
@@ -27,6 +34,9 @@ jobs:
   deploy:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    env:
+      PROJECT: ${{ inputs.project_name || 'deepseek-harness-web' }}
+      SUBDOMAIN: ${{ inputs.workers_subdomain || 'xiaohai-dsh' }}
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -74,43 +84,71 @@ jobs:
             exit 1
           fi
 
+      # The gate fails closed: without both secrets every request answers 503,
+      # so a deploy that skipped them would take the site down.
+      - name: Store the gate secrets
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          DSH_SITE_PASSWORD: ${{ secrets.DSH_SITE_PASSWORD }}
+          DSH_SITE_SECRET: ${{ secrets.DSH_SITE_SECRET }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DSH_SITE_PASSWORD:-}" ] || [ -z "${DSH_SITE_SECRET:-}" ]; then
+            echo '::error::DSH_SITE_PASSWORD and DSH_SITE_SECRET repository secrets are required'
+            exit 1
+          fi
+          printf '%s' "$DSH_SITE_PASSWORD" | npx --yes wrangler@4 secret put DSH_SITE_PASSWORD -c cloudflare/static/wrangler.jsonc --name "$PROJECT"
+          printf '%s' "$DSH_SITE_SECRET" | npx --yes wrangler@4 secret put DSH_SITE_SECRET -c cloudflare/static/wrangler.jsonc --name "$PROJECT"
+
       - name: Deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: |
-          npx --yes wrangler@4 deploy -c cloudflare/static/wrangler.jsonc \
-            --name "${{ inputs.project_name || 'deepseek-harness-web' }}"
+        run: npx --yes wrangler@4 deploy -c cloudflare/static/wrangler.jsonc --name "$PROJECT"
 
-      - name: Verify the deployment serves the packed image uncompressed
+      # Four facts, each with its own failure meaning: an anonymous visitor is
+      # redirected, an anonymous asset request is refused, a wrong password is
+      # rejected, and the right one yields a cookie that serves the packed image
+      # without transport compression (which would make the browser worker
+      # inflate a plain tar).
+      - name: Verify the gate and the image
+        env:
+          DSH_SITE_PASSWORD: ${{ secrets.DSH_SITE_PASSWORD }}
         run: |
-          url="https://${{ inputs.project_name || 'deepseek-harness-web' }}.${WORKERS_SUBDOMAIN}.workers.dev"
-          echo "deployment: $url"
-          code=000
+          set -euo pipefail
+          base="https://${PROJECT}.${SUBDOMAIN}.workers.dev"
+          echo "deployment: $base"
+          code=$(curl -sS -o /dev/null -w '%{http_code}' -H 'Accept: text/html' "$base/")
+          [ "$code" = "302" ] || { echo "::error::anonymous root answered $code, not a 302 to the gate"; exit 1; }
+          echo "anonymous root: 302 to the gate"
+          code=$(curl -sS -o /dev/null -w '%{http_code}' "$base/preview/vfs-image.tar.gz")
+          [ "$code" = "401" ] || { echo "::error::anonymous asset request answered $code, not 401"; exit 1; }
+          echo "anonymous asset: 401"
+          code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST -d 'password=wrong&next=/' "$base/__gate")
+          [ "$code" = "401" ] || { echo "::error::a wrong password answered $code, not 401"; exit 1; }
+          echo "wrong password: 401"
+          cookie=$(curl -sS -D - -o /dev/null -X POST --data-urlencode "password=${DSH_SITE_PASSWORD}" -d 'next=/' "$base/__gate" \
+            | grep -i '^set-cookie:' | sed 's/^[Ss]et-[Cc]ookie: //' | cut -d';' -f1 | tr -d '\r')
+          [ -n "$cookie" ] || { echo "::error::the right password returned no session cookie"; exit 1; }
+          echo "right password: cookie issued"
           for attempt in 1 2 3 4 5; do
-            code=$(curl -sS -o image.bin -D headers.txt -w '%{http_code}' \
-              -H 'Accept-Encoding: gzip' "$url/preview/vfs-image.tar.gz" || echo 000)
-            echo "attempt $attempt: HTTP $code"
+            code=$(curl -sS -o image.bin -D headers.txt -w '%{http_code}' -H 'Accept-Encoding: gzip' -H "cookie: $cookie" "$base/preview/vfs-image.tar.gz" || echo 000)
+            echo "image attempt $attempt: HTTP $code"
             [ "$code" = "200" ] && break
             sleep 10
           done
-          if [ "$code" != "200" ]; then
-            echo "::error::the packed image URL answered $code, not 200"
-            head -20 headers.txt
-            exit 1
-          fi
+          [ "$code" = "200" ] || { echo "::error::the packed image answered $code with a valid session"; head -20 headers.txt; exit 1; }
           if grep -qi '^content-encoding:' headers.txt; then
-            echo "::error::the platform compressed an already-compressed image, so the browser worker would inflate a plain tar:"
+            echo "::error::the platform compressed an already-compressed image:"
             grep -i '^content-encoding:' headers.txt
             exit 1
           fi
           magic=$(head -c 2 image.bin | od -An -tx1 | tr -d ' \n')
-          if [ "$magic" != "1f8b" ]; then
-            echo "::error::image does not start with the gzip magic number: $magic"
-            exit 1
-          fi
+          [ "$magic" = "1f8b" ] || { echo "::error::image does not start with the gzip magic number: $magic"; exit 1; }
           echo "image served as $(wc -c < image.bin) gzip bytes"
-          echo "### Deployed" >> "$GITHUB_STEP_SUMMARY"
-          echo "$url" >> "$GITHUB_STEP_SUMMARY"
-        env:
-          WORKERS_SUBDOMAIN: xiaohai-dsh
+          {
+            echo '### Deployed'
+            echo
+            echo "$base — password required, session cookie valid for 30 days."
+          } >> "$GITHUB_STEP_SUMMARY"

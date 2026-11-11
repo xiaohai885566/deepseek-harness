@@ -371,7 +371,9 @@ async function handleProxy(request: Request, url: URL, env: Env): Promise<Respon
   }
   const out = new Headers(response.headers)
   for (const name of DROPPED_HEADERS) out.delete(name)
-  return new Response(bodyless ? null : response.body, {
+  // The upstream body always comes back, including on GET: a model listing is
+  // an ordinary GET whose body is the answer. `bodyless` describes the request.
+  return new Response(response.body, {
     status: response.status,
     statusText: response.statusText,
     headers: out,

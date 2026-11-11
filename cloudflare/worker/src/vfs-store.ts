@@ -217,5 +217,16 @@ export async function handleVfs(request: Request, url: URL, env: VfsEnv): Promis
     }
     return json(await applyMutations(database, wellFormed))
   }
+  if (verb === 'clear' && request.method === 'POST') {
+    // `?reset-vfs=1` on the page clears the browser's copy; without this the
+    // next boot would immediately seed it back from here and the reset would
+    // look like it did nothing.
+    await database.prepare('DELETE FROM vfs_entries').run()
+    const revision = (await readRevision(database)) + 1
+    await database.prepare(
+      'INSERT INTO vfs_meta (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = ?2',
+    ).bind('revision', String(revision)).run()
+    return json({ revision, cleared: true })
+  }
   return json({ error: `no VFS verb for ${request.method} ${url.pathname}` }, 404)
 }

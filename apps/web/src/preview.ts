@@ -6,12 +6,17 @@
  */
 import DshWorker from '@deepseek-ai/dsh-experimental-webworker-runtime/worker?worker'
 import {
-  chooseWorkerHostSource, connectWorkerHost, IMAGE_FILE_NAME, resetPersistedVfs,
+  chooseWorkerHostSource, connectWorkerHost, IMAGE_FILE_NAME, resetPersistedVfs, resetRemoteVfs,
 } from '@deepseek-ai/dsh-experimental-webworker-runtime/client'
 
 // `?reset-vfs` throws away the persisted filesystem before the host mounts, for
-// state that outlived the build that wrote it.
-if (new URL(location.href).searchParams.has('reset-vfs')) await resetPersistedVfs()
+// state that outlived the build that wrote it. Both copies go: clearing only
+// the browser's store would be undone by the next boot seeding it back from the
+// deployment's copy.
+if (new URL(location.href).searchParams.has('reset-vfs')) {
+  await resetPersistedVfs()
+  await resetRemoteVfs()
+}
 
 const image = `preview/${IMAGE_FILE_NAME}`
 const source = await chooseWorkerHostSource({ image })

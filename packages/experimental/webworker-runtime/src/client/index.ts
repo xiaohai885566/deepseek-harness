@@ -135,6 +135,23 @@ export async function chooseWorkerHostSource(
  * @param database - Database name, matching the sink's.
  * @returns A promise that settles when the database is gone.
  */
+/**
+ * Drop the deployment's durable copy of the filesystem.
+ *
+ * The page's `?reset-vfs=1` clears the browser's store; with cross-device sync
+ * on, that alone is not a reset — the next boot would seed the browser's store
+ * straight back from the deployment. Best effort: a deployment without the
+ * store answers 404/503 and there is nothing to clear.
+ * @param endpoint - verb prefix, for a deployment that mounts it elsewhere.
+ */
+export async function resetRemoteVfs(endpoint = '/__vfs/'): Promise<void> {
+  if (typeof fetch !== 'function') return
+  try {
+    const base = typeof location === 'undefined' ? 'http://localhost/' : location.href
+    await fetch(new URL(`${endpoint}clear`, base).href, { method: 'POST', credentials: 'same-origin' })
+  } catch { /* A deployment with no store has nothing to clear. */ }
+}
+
 export async function resetPersistedVfs(database = 'dsh-web-vfs'): Promise<void> {
   if (typeof indexedDB === 'undefined') return
   await new Promise<void>((resolve) => {

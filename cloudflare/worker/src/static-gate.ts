@@ -12,6 +12,8 @@
  * @module cloudflare/worker/src/static-gate
  */
 
+import { handleVfs, VFS_PATH } from './vfs-store'
+
 /** Bindings this Worker reads. */
 interface Env {
   /** The static asset layer holding the built browser app. */
@@ -27,6 +29,11 @@ interface Env {
    * becoming an open proxy.
    */
   DSH_PROXY_ALLOW?: string
+  /**
+   * Durable filesystem store for cross-device sync. Unset leaves the preview's
+   * state in the browser that wrote it.
+   */
+  VFS_DB?: D1Database
 }
 
 const COOKIE_NAME = 'dsh_gate'
@@ -433,6 +440,9 @@ export default {
 
     if (await hasSession(request, secret)) {
       if (url.pathname.startsWith(PROXY_PATH)) return handleProxy(request, url, env)
+      // The filesystem store answers only a caller that already proved the
+      // password: it holds the operator's own workspace.
+      if (url.pathname.startsWith(VFS_PATH)) return handleVfs(request, url, env)
       return env.ASSETS.fetch(request)
     }
     if (wantsHtml(request)) return toGate(url)

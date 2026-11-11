@@ -12,6 +12,12 @@
   "name": "deepseek-harness-web",
   "main": "../worker/src/static-gate.ts",
   "compatibility_date": "2026-11-10",
+  // Durable copy of the preview's filesystem, so a phone and a laptop share one
+  // workspace instead of two. `/__vfs/` is served by the same Worker, behind the
+  // same password gate; unset the binding and the deployment keeps state local.
+  "d1_databases": [
+    { "binding": "VFS_DB", "database_name": "dsh-vfs", "database_id": "b467198b-c224-4e1c-a345-584a7d689664" }
+  ],
   "assets": {
     "directory": "../../apps/web/dist",
     "binding": "ASSETS",

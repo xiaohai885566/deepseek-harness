@@ -34,7 +34,7 @@ import type { RequestListener } from './transport/synthetic-http.ts'
 import { TunnelServer, type TunnelPort } from './transport/tunnel.ts'
 import { inflateImage, inflateImageStream } from './storage/image-gzip.ts'
 import { loadVfsImage, loadVfsOverlay, MemoryVfs } from './storage/memory.ts'
-import { IndexedDbMutationSink, type VfsPersistenceOptions } from './storage/indexeddb.ts'
+import { persistenceSinks, type PersistenceOptions } from './storage/sinks.ts'
 import { setActiveVfs } from './storage/active.ts'
 import { setTextViewer } from './shell/process/xdg-open.ts'
 import { packPackageAssets } from './package-assets.ts'
@@ -130,7 +130,7 @@ export interface WorkerHostOptions {
    * seed them back on the next boot. Off unless asked for: a host that mounts a
    * throwaway image should stay throwaway. Pass `false` to be explicit.
    */
-  readonly persistence?: Omit<VfsPersistenceOptions, 'root'> | false
+  readonly persistence?: PersistenceOptions | false
 }
 
 /** The assembled worker host. */
@@ -201,8 +201,8 @@ export function createWorkerHost(options: WorkerHostOptions): WorkerHost {
       ])
       const persistence = options.persistence === undefined || options.persistence === false
         ? undefined
-        : new IndexedDbMutationSink({ ...options.persistence, root })
-      const mounted = loadVfsImage(bytes, root, new MemoryVfs(persistence === undefined ? {} : { sink: persistence }))
+        : persistenceSinks(options.persistence, root)
+      const mounted = loadVfsImage(bytes, root, new MemoryVfs(persistence === undefined ? {} : { sink: persistence.sink }))
       for (const overlay of overlays) loadVfsOverlay(overlay, root, mounted)
       // Belt and braces over the image's own empty-directory entries: a hand
       // -built image without them still boots.
@@ -211,7 +211,7 @@ export function createWorkerHost(options: WorkerHostOptions): WorkerHost {
       }
       // Before anything reads a config file: the profile bundle and the model
       // routes are restored state, not image state.
-      if (persistence !== undefined) await persistence.hydrate(mounted)
+      if (persistence !== undefined) await persistence.restore(mounted)
       setActiveVfs(mounted)
       vfs = mounted
 

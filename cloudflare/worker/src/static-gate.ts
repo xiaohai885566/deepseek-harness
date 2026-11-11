@@ -20,11 +20,29 @@ interface Env {
   DSH_SITE_PASSWORD?: string
   /** HMAC key for session cookies. Rotating it invalidates every session. */
   DSH_SITE_SECRET?: string
+  /**
+   * Optional comma-separated host allowlist for the model relay. Empty or unset
+   * forwards to any host, which is the right default for a single-operator
+   * deployment behind the password; set it to keep a shared deployment from
+   * becoming an open proxy.
+   */
+  DSH_PROXY_ALLOW?: string
 }
 
 const COOKIE_NAME = 'dsh_gate'
 const GATE_PATH = '/__gate'
 const LOGOUT_PATH = '/__gate/logout'
+/**
+ * Same-origin relay for model endpoints.
+ *
+ * The harness runs in a browser worker, so every model request is an ordinary
+ * cross-origin `fetch`: an endpoint that sends no CORS headers, or one served
+ * over plain `http` from an `https` page, fails with the OpenAI SDK's bare
+ * "Connection error." A base URL of
+ * `<this deployment>/__proxy/https://endpoint/v1` puts the request back on this
+ * origin and lets the Worker make the outbound call instead.
+ */
+const PROXY_PATH = '/__proxy/'
 const SESSION_SECONDS = 60 * 60 * 24 * 30
 const LOCK_AFTER = 10
 const LOCK_WINDOW_MS = 60_000
@@ -279,6 +297,100 @@ function handleLogout(): Response {
   })
 }
 
+/** Request headers the relay carries to the endpoint, and nothing else. */
+const FORWARDED_HEADERS: readonly string[] = [
+  'authorization', 'x-api-key', 'content-type', 'accept', 'user-agent',
+  'anthropic-version', 'anthropic-beta', 'anthropic-dangerous-direct-browser-access',
+  'openai-organization', 'openai-project', 'openai-beta',
+]
+
+/**
+ * Response headers the relay drops: hop-by-hop framing, and the encoding the
+ * runtime already undid. The browser's own CORS policy does not apply to a
+ * same-origin response, so an upstream `access-control-*` value is noise here.
+ */
+const DROPPED_HEADERS: readonly string[] = [
+  'content-encoding', 'content-length', 'transfer-encoding', 'connection', 'keep-alive',
+  'set-cookie', 'access-control-allow-origin', 'access-control-allow-headers',
+  'access-control-allow-methods', 'access-control-expose-headers',
+]
+
+/**
+ * Relay one model request to the endpoint named in the path.
+ *
+ * The body is passed through as a stream in both directions, so an SSE
+ * completion reaches the page event by event instead of after the last token.
+ * @param request - the same-origin request from the harness.
+ * @param url - its URL, whose path after {@link PROXY_PATH} is the endpoint URL.
+ * @param env - the host allowlist, when one is configured.
+ * @returns the endpoint's response, or a refusal naming what was wrong.
+ */
+async function handleProxy(request: Request, url: URL, env: Env): Promise<Response> {
+  const target = url.pathname.slice(PROXY_PATH.length) + url.search
+  let upstream: URL
+  try {
+    upstream = new URL(target)
+  } catch {
+    return proxyError(400, `relay target is not a URL: ${JSON.stringify(target)}`)
+  }
+  if (upstream.protocol !== 'https:' && upstream.protocol !== 'http:') {
+    return proxyError(400, `relay target must be http(s): ${upstream.protocol}`)
+  }
+  const allowed = (env.DSH_PROXY_ALLOW ?? '').split(',').map(host => host.trim()).filter(host => host !== '')
+  if (allowed.length > 0 && !allowed.includes(upstream.host)) {
+    return proxyError(403, `relay host is not in DSH_PROXY_ALLOW: ${upstream.host}`)
+  }
+  if (request.method === 'OPTIONS') {
+    return new Response(null, {
+      status: 204,
+      headers: {
+        'access-control-allow-origin': '*',
+        'access-control-allow-headers': FORWARDED_HEADERS.join(', '),
+        'access-control-allow-methods': 'GET, POST, OPTIONS',
+        'access-control-max-age': '86400',
+      },
+    })
+  }
+
+  const headers = new Headers()
+  for (const name of FORWARDED_HEADERS) {
+    const value = request.headers.get(name)
+    if (value !== null) headers.set(name, value)
+  }
+  const bodyless = request.method === 'GET' || request.method === 'HEAD'
+  let response: Response
+  try {
+    response = await fetch(upstream.toString(), {
+      method: request.method,
+      headers,
+      ...bodyless ? {} : { body: request.body },
+      redirect: 'follow',
+    })
+  } catch (reason) {
+    return proxyError(502, `relay could not reach ${upstream.origin}: ${(reason as Error).message}`)
+  }
+  const out = new Headers(response.headers)
+  for (const name of DROPPED_HEADERS) out.delete(name)
+  return new Response(bodyless ? null : response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: out,
+  })
+}
+
+/**
+ * Build a relay refusal the harness surfaces verbatim.
+ * @param status - HTTP status to answer with.
+ * @param message - what the relay could not do.
+ * @returns the JSON refusal.
+ */
+function proxyError(status: number, message: string): Response {
+  return new Response(JSON.stringify({ error: 'relay', message }), {
+    status,
+    headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
+  })
+}
+
 export default {
   /**
    * Gate every request, then hand the authenticated ones to the asset layer.
@@ -303,7 +415,10 @@ export default {
       })
     }
 
-    if (await hasSession(request, secret)) return env.ASSETS.fetch(request)
+    if (await hasSession(request, secret)) {
+      if (url.pathname.startsWith(PROXY_PATH)) return handleProxy(request, url, env)
+      return env.ASSETS.fetch(request)
+    }
     if (wantsHtml(request)) return toGate(url)
     return new Response(JSON.stringify({ error: 'unauthorized', gate: GATE_PATH }), {
       status: 401,

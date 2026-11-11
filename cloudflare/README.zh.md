@@ -61,6 +61,27 @@ npx wrangler@4 secret put DSH_SITE_PASSWORD -c cloudflare/static/wrangler.jsonc
 
 代价：`run_worker_first: true` 让每个请求都先过 Worker，所以静态资源也计入免费额度（10 万请求/天）。这条门只保护"能不能拿到页面"，模型密钥始终在各访问者自己的浏览器里。
 
+### 模型端点中转 `/__proxy/`
+
+浏览器版的所有模型请求都是**页面发出的跨域 `fetch`**。所以端点不返回 CORS 头、或者端点是 `http://` 而页面是 `https://`，都会失败——OpenAI SDK 只会报一句 `Connection error.`，看不出原因。
+
+把 baseURL 换成同源中转即可，Worker 替浏览器发起外呼：
+
+```
+https://<你的部署域名>/__proxy/https://api.example.com/v1
+```
+
+| 行为 | 结果 |
+| --- | --- |
+| 中转路径 | `/__proxy/<完整上游 URL>`，路径其余部分原样拼给上游 |
+| 需要登录 | 是，和 assets 同一条 cookie；没 cookie 直接 401 |
+| 转发头 | 只带 `authorization`、`x-api-key`、`content-type`、`accept`、`anthropic-*`、`openai-*`、`user-agent`；**不带** cookie / origin / referer |
+| 响应 | 双向流式，SSE 逐 token 回传；`content-encoding`、`content-length`、`set-cookie` 一律剥掉 |
+| 上游不可达 | 502，body 里写明上游 origin 和原因 |
+| 限定可中转的主机 | 设 `DSH_PROXY_ALLOW=api.example.com,other.example`（逗号分隔，空=不限） |
+
+不设 `DSH_PROXY_ALLOW` 时，任何拿到密码的人都能借这个 Worker 访问任意 http(s) 地址；单人部署可接受，多人共用建议设上。
+
 ## 前置条件
 
 - Cloudflare 账号开通 **Workers 付费版**（Containers 属于付费能力），并记下 Account ID。

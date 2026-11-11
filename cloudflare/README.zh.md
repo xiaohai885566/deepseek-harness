@@ -22,6 +22,23 @@
 | 启动 URL 带进程级 token，容器日志之外的入口拿不到 | 代理从 stdout 抓 `dsh web: …?token=…`，`GET /__dsh/launch` 与"未认证访问 `/`"都 302 到 `/?token=…`，由监听器自己签发 cookie | `cloudflare/edge-proxy.mjs` |
 | 容器就绪前转发会打进半挂载的插件树 | 代理只在抓到启动行之后让 `/health` 返回 200，Durable Object 轮询它再放流量 | `cloudflare/edge-proxy.mjs`、`cloudflare/worker/src/index.ts` |
 
+## 免费账户
+
+**不行**——Containers 只在 Workers 付费版（$5/月）提供，免费账户创建不了容器，所以"跑真身"这条路免费账户走不了。
+
+免费账户能走的是 `cloudflare/static/`：静态资源 + 浏览器 Web Worker 里跑 host + 内存 VFS，不产生任何服务端进程。代价要说清楚：
+
+- **没有真 shell**：`bash` 工具在虚拟文件系统里执行，碰不到宿主机，也 clone 不了真实仓库
+- **没有持久化**：刷新页面后会话和文件都在内存里，模型凭据要重填
+- **密钥在你自己的浏览器里**：浏览器直连 `api.deepseek.com`（该接口回 `access-control-allow-origin: <你的源>`，可以直连，不需要代理 Worker）
+- **静态资源限制**：单文件 25 MiB、单次部署 20,000 个文件（脚本会先检查再部署）
+
+```sh
+./cloudflare/static/deploy.sh      # pnpm install → build → build:preview → 整形 → wrangler deploy
+```
+
+要真身又不想给 Cloudflare 付费：`cloudflare/Dockerfile` 是标准镜像，Koyeb / Render / Fly.io / Hugging Face Spaces / Google Cloud Run 都能直接跑同一份，把容器端口设成 8080、环境变量设 `DEEPSEEK_API_KEY` 即可。`edge-proxy.mjs` 那一层与平台无关，只要求容器内能监听一个端口。
+
 ## 前置条件
 
 - Cloudflare 账号开通 **Workers 付费版**（Containers 属于付费能力），并记下 Account ID。
@@ -81,7 +98,7 @@ Secrets（`wrangler secret put`）：
 
 ## 备选：纯浏览器版（不跑容器）
 
-仓库自带 `pnpm --filter @deepseek-ai/dsh-web-frontend run build:preview`，产物是「浏览器 Web Worker 里跑 host + 内存 VFS」的静态页，可以直接 `wrangler pages deploy apps/web/dist`。代价是：没有真 shell、没有真文件系统、模型密钥在浏览器里、且需要浏览器直连模型 API（跨域受限）。要完整体验就用上面的容器方案。
+就是上面「免费账户」那一条，独立成一个目录：`cloudflare/static/wrangler.jsonc`（assets-only Worker，没有 `main`，不占 Worker 请求额度）+ `cloudflare/static/deploy.sh`。要完整体验就用容器方案。
 
 ## 故障排查
 

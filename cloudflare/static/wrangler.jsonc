@@ -1,0 +1,19 @@
+// Free-plan deployment: the browser build, served as static assets.
+//
+// `pnpm --filter @deepseek-ai/dsh-web-frontend run build:preview` emits a page
+// that boots the host inside a browser Web Worker over an in-memory VFS. There
+// is no server here: no container, no Worker script, no secrets. Each visitor's
+// model credential lives in that visitor's browser.
+//
+// Deploy: ./cloudflare/static/deploy.sh
+{
+  "name": "deepseek-harness-web",
+  "compatibility_date": "2026-11-10",
+  "assets": {
+    "directory": "../../apps/web/dist",
+    // The page is one entry with client-side routing; a missing path should
+    // load the app rather than 404.
+    "not_found_handling": "single-page-application",
+    "html_handling": "auto-trailing-slash"
+  }
+}

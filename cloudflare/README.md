@@ -22,6 +22,23 @@ browser ──HTTPS/WSS──► Worker (cloudflare/worker/src/index.ts)
 | The launch URL carries a process credential that no entry point outside the container log knows | The proxy scrapes `dsh web: …?token=…` from stdout; both `GET /__dsh/launch` and an unauthenticated `/` redirect to `/?token=…`, and the listener mints the cookie itself | `cloudflare/edge-proxy.mjs` |
 | Traffic forwarded before the plugin tree settles lands in a half-mounted host | `/health` answers 200 only after the launch line appears, and the Durable Object polls it before forwarding | `cloudflare/edge-proxy.mjs`, `cloudflare/worker/src/index.ts` |
 
+## Free plan
+
+**No.** Containers ship with the Workers paid plan ($5/month); a free account cannot create one, so the real-host path is closed to it.
+
+What a free account can run is `cloudflare/static/`: static assets plus the host inside a browser Web Worker over an in-memory VFS, with no server process anywhere. The cost is concrete:
+
+- **No real shell.** The `bash` tool runs inside the virtual filesystem: it cannot touch a host or clone a real repository.
+- **No persistence.** A reload drops the session and the files with it, and the model credential must be entered again.
+- **The key lives in the visitor's browser.** The browser calls `api.deepseek.com` directly; that endpoint answers `access-control-allow-origin: <your origin>`, so no proxy Worker is needed.
+- **Asset limits.** 25 MiB per file, 20,000 files per deployment (the script checks before it deploys).
+
+```sh
+./cloudflare/static/deploy.sh      # pnpm install → build → build:preview → shape → wrangler deploy
+```
+
+To run the real host without paying Cloudflare, `cloudflare/Dockerfile` is a plain image: Koyeb, Render, Fly.io, Hugging Face Spaces, and Google Cloud Run all run the same one. Point the container port at 8080 and set `DEEPSEEK_API_KEY`. The `edge-proxy.mjs` layer is platform-independent; it only needs one listenable port inside the container.
+
 ## Prerequisites
 
 - A Cloudflare account on the **Workers paid plan** (Containers are a paid feature) and its Account ID.
@@ -81,7 +98,7 @@ Secrets (`wrangler secret put`):
 
 ## Alternative: browser-only build (no container)
 
-The repository already ships `pnpm --filter @deepseek-ai/dsh-web-frontend run build:preview`, whose output runs the host inside a browser Web Worker over an in-memory VFS and deploys as static files (`wrangler pages deploy apps/web/dist`). The cost: no real shell, no real filesystem, the model key lives in the browser, and the browser must reach the model API directly (CORS applies). Use the container deployment above for the real thing.
+That is the free-plan path above, split into its own directory: `cloudflare/static/wrangler.jsonc` (an assets-only Worker with no `main`, so it consumes no Worker requests) plus `cloudflare/static/deploy.sh`. Use the container deployment for the real thing.
 
 ## Troubleshooting
 

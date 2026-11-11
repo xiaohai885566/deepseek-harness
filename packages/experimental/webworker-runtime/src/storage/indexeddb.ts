@@ -3,19 +3,23 @@
  *
  * The preview's VFS is mounted from a build-time image and lives in memory, so
  * without a sink a reload throws away everything the app wrote: the model routes
- * a user just added, their settings, their session logs. This sink mirrors the
- * user-owned subtrees (`home/`, `workspace/` — the same two the layout already
- * declares as overlay directories) into IndexedDB and seeds them back over the
- * freshly mounted image on the next boot. Runtime code, the config tree and
- * `tmp/` are never mirrored: they belong to the image, and a stale copy would
- * shadow the build the deployment just shipped.
+ * a user just added, their settings, their session logs.
+ *
+ * What is mirrored is therefore an allowlist of files the *user* owns, not a
+ * subtree. `home/` also holds bootstrap state that the image owns and that a new
+ * build must be free to replace — the platform patch `home/cordis.patch.yml`
+ * and the profile manifest `home/profiles/<name>/package.json` — and restoring a
+ * stale copy of either leaves a profile whose patch layer and bundle list
+ * disagree with the code the deployment just shipped. Mirrored: the user patch
+ * layer (`home/profiles/<name>/cordis.patch.yml`, where settings and model
+ * routes live), the session logs under `home/sessions`, and `workspace/`.
  *
  * Failures never reach the caller of a write: the in-memory mutation has already
  * committed by the time the sink sees it, so the contract is to report once and
  * stop mirroring rather than reject.
  * @module @deepseek-ai/dsh-experimental-webworker-runtime/src/storage/indexeddb
  */
-import { IMAGE_OVERLAY_DIRECTORIES } from '../image-layout.ts'
+import { IMAGE_HOME_DIRECTORY } from '../image-layout.ts'
 import { join, SEP } from '../module-system/posix-path.ts'
 import type { MemoryVfs } from './memory.ts'
 import type { VfsMutation, VfsMutationSink } from './types.ts'
@@ -98,8 +102,10 @@ export class IndexedDbMutationSink implements VfsMutationSink {
   private readonly database: string
   private readonly maxFileBytes: number
   private readonly maxTotalBytes: number
-  /** Subtrees mirrored, as absolute path prefixes. */
-  private readonly subtrees: readonly string[]
+  /** Path prefixes mirrored verbatim. */
+  private readonly prefixes: readonly string[]
+  /** Per-profile user patch layer, the file settings and model routes land in. */
+  private readonly userPatch: RegExp
   private queue: PendingWrite[] = []
   private draining: Promise<void> | undefined
   private databasePromise: Promise<IDBDatabase> | undefined
@@ -115,7 +121,12 @@ export class IndexedDbMutationSink implements VfsMutationSink {
     this.database = options.database ?? DEFAULT_DATABASE
     this.maxFileBytes = options.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES
     this.maxTotalBytes = options.maxTotalBytes ?? DEFAULT_MAX_TOTAL_BYTES
-    this.subtrees = IMAGE_OVERLAY_DIRECTORIES.map(directory => join(this.root, directory))
+    this.prefixes = [
+      join(this.root, 'workspace'),
+      join(this.root, IMAGE_HOME_DIRECTORY, 'sessions'),
+    ]
+    const escaped = join(this.root, IMAGE_HOME_DIRECTORY, 'profiles').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    this.userPatch = new RegExp(`^${escaped}/[^/]+/cordis\\.patch\\.yml$`)
   }
 
   /** Whether this realm can persist at all. */
@@ -183,6 +194,15 @@ export class IndexedDbMutationSink implements VfsMutationSink {
       return
     }
     if (entries.length === 0) return
+    // Prune what an earlier policy stored and this one refuses: a stale platform
+    // patch or profile manifest is exactly what breaks the next boot, and it is
+    // already in the database of anyone who ran the wider version.
+    const stale = entries.filter(entry => !this.persists(entry.path))
+    if (stale.length > 0) {
+      entries = entries.filter(entry => this.persists(entry.path))
+      void this.forget(stale.map(entry => entry.path))
+    }
+    if (entries.length === 0) return
     const depth = (path: string): number => path.split(SEP).length
     const directories = entries.filter(entry => entry.directory).sort((left, right) => depth(left.path) - depth(right.path))
     const files = entries.filter(entry => !entry.directory)
@@ -206,12 +226,28 @@ export class IndexedDbMutationSink implements VfsMutationSink {
   }
 
   /**
+   * Delete stored entries by path, best effort.
+   * @param paths - Keys to drop.
+   */
+  private async forget(paths: readonly string[]): Promise<void> {
+    try {
+      const database = await this.open()
+      const store = database.transaction(STORE, 'readwrite').objectStore(STORE)
+      for (const path of paths) store.delete(path)
+      await resolveTransaction(store.transaction)
+    } catch (error) {
+      this.reportFailure(error)
+    }
+  }
+
+  /**
    * Whether a path is inside one of the mirrored subtrees.
    * @param path - Absolute path the filesystem reported.
    * @returns true when the path belongs to the user.
    */
   private persists(path: string): boolean {
-    return this.subtrees.some(subtree => path === subtree || path.startsWith(`${subtree}${SEP}`))
+    if (this.userPatch.test(path)) return true
+    return this.prefixes.some(prefix => path === prefix || path.startsWith(`${prefix}${SEP}`))
   }
 
   /** Queue one drain on the next microtask, coalescing a burst into one transaction. */

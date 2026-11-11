@@ -125,6 +125,29 @@ export async function chooseWorkerHostSource(
 }
 
 /**
+ * Delete the preview's persisted filesystem, so the next boot mounts the bare
+ * image again.
+ *
+ * An escape hatch for state that survives across builds and turns out to be
+ * unusable — a half-written user patch, a profile whose settings no longer
+ * parse. Call it before the host worker spawns: the delete blocks while any
+ * open connection holds the database.
+ * @param database - Database name, matching the sink's.
+ * @returns A promise that settles when the database is gone.
+ */
+export async function resetPersistedVfs(database = 'dsh-web-vfs'): Promise<void> {
+  if (typeof indexedDB === 'undefined') return
+  await new Promise<void>((resolve) => {
+    const request = indexedDB.deleteDatabase(database)
+    // `onblocked` still resolves: another tab holding a connection must not hang
+    // the page, and the delete completes once that tab closes.
+    request.onsuccess = (): void => { resolve() }
+    request.onerror = (): void => { resolve() }
+    request.onblocked = (): void => { resolve() }
+  })
+}
+
+/**
  * Connect a spawned host worker and complete the pre-Cordis handshake.
  *
  * The caller constructs the Worker so its bundler resolves the bundle URL

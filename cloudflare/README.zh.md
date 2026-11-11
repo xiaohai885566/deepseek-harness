@@ -108,7 +108,34 @@ https://<你的部署域名>/__proxy/https://api.example.com/v1
 | 换数据库名 | `createWorkerHost({ persistence: { database: 'x' } })`；传 `false` 关掉 |
 | 一键清空 | 打开 `?reset-vfs=1`（可与 `?preview-fixture=none` 同用），下次启动就是干净镜像 |
 
-数据在浏览器本地（IndexedDB，按 origin 隔离），换设备、换浏览器、无痕窗口都不共享。要彻底清空：DevTools → Application → IndexedDB → 删 `dsh-web-vfs`。
+数据在浏览器本地（IndexedDB，按 origin 隔离）。要彻底清空：DevTools → Application → IndexedDB → 删 `dsh-web-vfs`。
+
+## 跨设备同步（D1）
+
+上面的 IndexedDB 只让**同一台设备**刷新不丢。要让手机和电脑看到同一份工作区，部署自己得有一份持久副本，这里用 D1：
+
+| 项 | 行为 |
+| --- | --- |
+| 表结构 | `cloudflare/worker/schema.sql`：`vfs_entries`（一路径一行，目录也是行）+ `vfs_meta`（`revision` 计数） |
+| 绑定 | `cloudflare/static/wrangler.jsonc` 的 `d1_databases` → `VFS_DB`；不设绑定则 `/__vfs/` 返回 503，退化成纯本地 |
+| 读 | `GET /__vfs/snapshot` → `{ revision, entries: [{ p, d, m, b }] }`，`b` 是 base64 |
+| 写 | `POST /__vfs/apply` → `{ mutations: [{ kind, path, mode?, bytes? }] }`，`kind` 为 `write`/`mkdir`/`remove`/`chmod`；`remove` 连子树一起删 |
+| 鉴权 | 两个接口都在密码门后面，没有有效 cookie 一律 401 |
+| 同步范围 | 和 IndexedDB 同一份白名单（`storage/policy.ts`），两个镜像不会跑偏 |
+| 启动顺序 | 先问部署；部署有内容就以它为准，并把内容回写本地当离线缓存。部署为空/不可达才用本地副本 |
+| 升级迁移 | 部署可读但为空、而本地有内容时，把本地整份传上去一次——老用户升级后不会从零开始 |
+| 冲突 | 按路径后写覆盖。两台设备同时改同一个文件，谁最后落库算谁的 |
+| 上限 | 单文件 1.5 MB（D1 单行 2 MB，base64 还要涨三分之一），超了跳过并警告，文件留在本机 |
+| 关掉 | `createWorkerHost({ persistence: { remote: false } })` |
+
+首次部署要建库和建表：
+
+```bash
+npx wrangler@4 d1 create dsh-vfs                       # 把返回的 database_id 填进 wrangler.jsonc
+npx wrangler@4 d1 execute dsh-vfs --remote --file cloudflare/worker/schema.sql -c cloudflare/static/wrangler.jsonc
+```
+
+免费额度：5 GB 存储、每天 500 万行读 / 10 万行写——单人多设备远远用不完。
 
 ## 前置条件
 

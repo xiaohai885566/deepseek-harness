@@ -24,11 +24,16 @@ import { installProcessGlobal } from './node/globals/process.ts'
 import { installCryptoGlobals } from './node/globals/crypto.ts'
 import { isShellStartFrame } from './shell/process/protocol.ts'
 import { runShellProcess } from './shell/process/host.ts'
+import { installPiAi } from './pi-ai-install.ts'
 
 // Before the timer globals, so the wrappers close over the patched platform.
 installAsyncContextHooks()
 installTimerGlobals()
 installCryptoGlobals()
+// Before the host mounts the image: `llm-pi-ai` reads the catalog and builds each
+// route's provider while it activates, and the VFS stub resolves this registry per
+// call, so the install has to land before the tree boots rather than after.
+installPiAi()
 
 let host: { handleMessage(data: unknown): void } | undefined
 let shellRole = false

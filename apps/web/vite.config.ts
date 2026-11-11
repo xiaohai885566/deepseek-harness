@@ -227,7 +227,19 @@ export default defineConfig({
   },
   worker: {
     // The preview worker rides dist/preview/ with the rest of that surface.
-    rollupOptions: { output: { entryFileNames: 'preview/[name]-[hash].js' } },
+    // ES rather than the IIFE default: the host's pi-ai install defers its
+    // OpenAI and Anthropic transports behind `import()`, and Rollup refuses
+    // code splitting under an IIFE output. Module workers are the only shape
+    // that can carry a lazy protocol implementation.
+    format: 'es',
+    rollupOptions: {
+      output: {
+        entryFileNames: 'preview/[name]-[hash].js',
+        // Lazy protocol chunks belong to the preview surface too, so the
+        // published payload still excludes one directory.
+        chunkFileNames: 'preview/[name]-[hash].js',
+      },
+    },
   },
   resolve: {
     // One instance per shared npm identity: a bare specifier otherwise resolves

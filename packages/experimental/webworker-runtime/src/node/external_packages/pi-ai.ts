@@ -1,91 +1,148 @@
 /**
- * `@earendil-works/pi-ai` stub, including its `/providers/all` and `/api/*.lazy`
- * subpaths. The package is Node-only (no `require`/`browser` conditions, Node
- * builtins plus five cloud SDKs in its transport layer) and `llm-pi-ai` imports it
- * statically at module scope, so the row cannot mount without it.
+ * `@earendil-works/pi-ai` stub, including its `/providers/all`, `/api/*.lazy`,
+ * `/models`, and `/utils/overflow` subpaths. The package is Node-only in its
+ * aggregate faces (its `providers/all` pulls five cloud SDKs and one API
+ * implementation imports `node:`) and `llm-pi-ai` imports it statically at module
+ * scope, so the row cannot mount without this module.
  *
- * Every symbol `llm-pi-ai` imports by name is present: a missing CommonJS symbol
- * would surface as `undefined` at call time instead of a link error. The row
- * reads the catalog while it activates, so the provider reader returns
- * providers without models and the two model readers return empty collections
- * instead of throwing: this deployment serves no pi-ai model. Everything on a
- * request path is loud.
+ * Two postures, one face:
+ *   - **Installed.** The worker bundle imported the real graph and published it
+ *     through {@link installPiAiImplementations} before the host booted. Every
+ *     member below then delegates to the real implementation, so a configured
+ *     route reaches the network and a built-in provider lists its models.
+ *   - **Absent.** Nothing was installed. `builtinProviders()` reports providers
+ *     with no models and every call path lands on a loud refusal naming the
+ *     unavailable symbol. That is the posture of a worker booted from a bundle
+ *     that carries no implementation, and it stays loud rather than degrading
+ *     into a silently empty catalog.
+ *
+ * Delegation is per call, not per module evaluation: this module is evaluated
+ * while the static table is built, which is before `installPiAi()` runs, so a
+ * bound reference here would capture the refusal and never see the install.
+ *
+ * Every symbol `llm-pi-ai` imports by name is present in both postures: a
+ * missing CommonJS symbol would surface as `undefined` at call time instead of a
+ * link error.
  */
 import { notImplementedFail } from '../notImplementedFail.ts'
+import {
+  installPiAiImplementations, piAiImplementations,
+  type PiAiApiFactory, type PiAiProviderShape,
+} from './pi-ai-implementations.ts'
+
+export { installPiAiImplementations, piAiImplementations }
+export type {
+  PiAiApiFactory, PiAiImplementations, PiAiProviderShape, PiAiProviderStreams,
+} from './pi-ai-implementations.ts'
 
 const MODULE = '@earendil-works/pi-ai'
 
-/** Provider factory (unavailable). */
-export const createProvider = notImplementedFail(MODULE, 'createProvider')
-
-/** Model-list factory (unavailable). */
-export const createModels = notImplementedFail(MODULE, 'createModels')
-
-/** Thinking-level catalog (unavailable). */
-export const getSupportedThinkingLevels = notImplementedFail(MODULE, 'getSupportedThinkingLevels')
-
-/** Context-overflow predicate (unavailable). */
-export const isContextOverflow = notImplementedFail(MODULE, 'isContextOverflow')
-
-/** Collection of every builtin provider (unavailable). */
-export const builtinModels = notImplementedFail(MODULE, 'builtinModels')
+/** The callable members this module serves, each resolvable at call time. */
+type Delegated =
+  | 'createProvider' | 'createModels' | 'getSupportedThinkingLevels' | 'isContextOverflow'
+  | 'openAICompletionsApi' | 'openAIResponsesApi' | 'anthropicMessagesApi'
 
 /**
- * Preview provider ids, in catalog order. This fixed subset must use valid
- * installed pi-ai identifiers so the adapter can attach authentication metadata.
+ * Build a member that answers the installed implementation, or refuses naming
+ * itself when this worker has none.
+ * @param symbol - the member being served.
+ * @returns a function forwarding its arguments to the installed implementation.
+ */
+function delegate<Face extends (...args: never[]) => unknown>(symbol: Delegated): Face {
+  return ((...args: never[]) => {
+    const installed = piAiImplementations()
+    if (installed === undefined) return notImplementedFail<(...inner: never[]) => never>(MODULE, symbol)(...args)
+    return (installed[symbol] as (...inner: never[]) => unknown)(...args)
+  }) as Face
+}
+
+/** Provider factory: pi-ai's own when installed, otherwise a refusal. */
+export const createProvider = delegate<(input: never) => unknown>('createProvider')
+
+/** Empty `Models` collection factory: pi-ai's own when installed, otherwise a refusal. */
+export const createModels = delegate<(options?: never) => unknown>('createModels')
+
+/** Reasoning-level resolver: pi-ai's own when installed, otherwise a refusal. */
+export const getSupportedThinkingLevels = delegate<(model: never) => unknown>('getSupportedThinkingLevels')
+
+/** Context-overflow predicate: pi-ai's own when installed, otherwise a refusal. */
+export const isContextOverflow = delegate<(message: never, contextWindow: never) => unknown>('isContextOverflow')
+
+/** `openai-completions` protocol factory: the real one when installed, otherwise a refusal. */
+export const openAICompletionsApi = delegate<PiAiApiFactory>('openAICompletionsApi')
+
+/** `openai-responses` protocol factory: the real one when installed, otherwise a refusal. */
+export const openAIResponsesApi = delegate<PiAiApiFactory>('openAIResponsesApi')
+
+/** `anthropic-messages` protocol factory: the real one when installed, otherwise a refusal. */
+export const anthropicMessagesApi = delegate<PiAiApiFactory>('anthropicMessagesApi')
+
+/**
+ * Preview provider ids, in catalog order. Used only in the absent posture, where
+ * the adapter still needs pi-ai's own identifiers to attach authentication
+ * metadata to: an empty list would make `llm-pi-ai` register no provider at all.
  */
 const BUILTIN_PROVIDER_IDS: readonly string[] = [
-  'amazon-bedrock', 'ant-ling', 'anthropic', 'azure', 'baseten', 'cerebras',
-  'cloudflare-ai-gateway', 'cloudflare-workers-ai', 'deepseek', 'fireworks', 'github-copilot',
-  'google', 'google-vertex', 'groq', 'huggingface', 'kimi-coding', 'minimax', 'minimax-cn',
-  'mistral', 'moonshotai', 'moonshotai-cn', 'nvidia', 'openai', 'openai-codex', 'opencode',
-  'opencode-go', 'openrouter', 'qwen-token-plan', 'qwen-token-plan-cn',
-  'qwen-token-plan-individual', 'together',
-  'vercel-ai-gateway', 'xai', 'xiaomi', 'xiaomi-token-plan-ams', 'xiaomi-token-plan-cn',
-  'xiaomi-token-plan-sgp', 'zai', 'zai-coding-cn',
+  'ant-ling', 'anthropic', 'azure', 'baseten', 'cerebras', 'cloudflare-ai-gateway',
+  'cloudflare-workers-ai', 'deepseek', 'fireworks', 'github-copilot', 'groq', 'huggingface',
+  'kimi-coding', 'meta', 'minimax', 'minimax-cn', 'moonshotai', 'moonshotai-cn', 'nvidia',
+  'openai', 'opencode', 'opencode-go', 'openrouter', 'qwen-token-plan', 'qwen-token-plan-cn',
+  'qwen-token-plan-individual', 'radius', 'together', 'typesafe', 'vercel-ai-gateway', 'xai',
+  'xiaomi', 'xiaomi-token-plan-ams', 'xiaomi-token-plan-cn', 'xiaomi-token-plan-sgp',
+  'zai', 'zai-coding-cn',
 ]
 
 /**
- * Installed catalog providers, read while `llm-pi-ai` activates. `llm-pi-ai`
- * registers the whole catalog as configurable the moment it mounts and rejects
- * an empty registration, so these carry pi-ai's ids instead of being an empty
- * list. Each has the api-key auth marker the adapter filters on, and no
- * models, so every request path lands on a loud symbol above.
- * @returns one entry per builtin provider.
+ * Catalog providers, read while `llm-pi-ai` activates.
+ * @returns the installed catalog with each provider's models, or model-less
+ *   placeholders naming pi-ai's providers when this worker has no implementation.
  */
-export function builtinProviders(): unknown[] {
+export function builtinProviders(): PiAiProviderShape[] {
+  const installed = piAiImplementations()
+  if (installed !== undefined) return [...installed.builtinProviders()]
   return BUILTIN_PROVIDER_IDS.map(id => ({
     id,
     name: id,
     auth: { apiKey: { type: 'api-key' } },
-    models: [],
+    getModels: () => [],
+    stream: notImplementedFail(MODULE, 'stream'),
+    streamSimple: notImplementedFail(MODULE, 'streamSimple'),
   }))
 }
 
 /**
  * Models of one installed catalog provider.
- * @returns no models.
+ * @param id - provider id the route names.
+ * @returns the provider's models, or none when this worker has no implementation.
  */
-export function getBuiltinModels(): unknown[] {
-  return []
+export function getBuiltinModels(id?: string): unknown[] {
+  const installed = piAiImplementations()
+  if (installed === undefined) return []
+  const provider = installed.builtinProviders().find(entry => entry.id === id)
+  return provider === undefined ? [] : [...provider.getModels()]
 }
 
 /**
  * Models of every type of one installed catalog provider.
- * @returns no models.
+ * @param id - provider id the route names.
+ * @returns the same catalog: a browser deployment exposes one model list per provider.
  */
-export function getAllBuiltinModels(): unknown[] {
-  return []
+export function getAllBuiltinModels(id?: string): unknown[] {
+  return getBuiltinModels(id)
 }
 
-/** Anthropic messages API binding (unavailable). */
-export const anthropicMessagesApi = notImplementedFail(MODULE, 'anthropicMessagesApi')
-
-/** OpenAI completions API binding (unavailable). */
-export const openAICompletionsApi = notImplementedFail(MODULE, 'openAICompletionsApi')
-
-/** OpenAI responses API binding (unavailable). */
-export const openAIResponsesApi = notImplementedFail(MODULE, 'openAIResponsesApi')
+/**
+ * A `Models` collection with every served provider registered.
+ * @param options - credential storage and ambient authentication integrations.
+ * @returns the collection, or a refusal when this worker has no implementation.
+ */
+export function builtinModels(options?: unknown): unknown {
+  const installed = piAiImplementations()
+  if (installed === undefined) return notImplementedFail<(options?: unknown) => never>(MODULE, 'builtinModels')(options)
+  const models = installed.createModels(options as never) as { setProvider(provider: unknown): void }
+  for (const provider of installed.builtinProviders()) models.setProvider(provider)
+  return models
+}
 
 /** CommonJS interop marker: the worker loader hands `default` to default imports. */
 export const __esModule = true
@@ -94,4 +151,5 @@ export const __esModule = true
 export default {
   createProvider, createModels, getSupportedThinkingLevels, isContextOverflow, builtinModels, builtinProviders,
   getBuiltinModels, getAllBuiltinModels, anthropicMessagesApi, openAICompletionsApi, openAIResponsesApi,
+  installPiAiImplementations, piAiImplementations,
 }

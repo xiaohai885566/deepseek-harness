@@ -91,6 +91,24 @@ https://<你的部署域名>/__proxy/https://api.example.com/v1
 
 不设 `DSH_PROXY_ALLOW` 时，任何拿到密码的人都能借这个 Worker 访问任意 http(s) 地址；单人部署可接受，多人共用建议设上。
 
+## 浏览器版的数据保存
+
+浏览器版的文件系统是从构建镜像挂载到内存里的。默认情况下**刷新即清空**：刚添加的模型、设置、会话记录全没了。
+
+现在 worker 会把用户自己的两个子树（`home/`、`workspace/`）镜像进 IndexedDB，下次启动时先挂镜像、再把它们盖回去：
+
+| 项 | 行为 |
+| --- | --- |
+| 保存范围 | `home/`、`workspace/`（也就是镜像布局里声明为用户目录的那两个） |
+| 不保存 | `node_modules/`、`config/`、`tmp/`——它们属于镜像，存了会在下次部署后盖住新版本 |
+| 写入时机 | 每次写文件后一个微任务内落库，一次事务一批；`flush()` 可等待 |
+| 恢复时机 | 镜像和 overlay 挂载完、profile 读取**之前** |
+| 上限 | 单文件 4 MB，总量 64 MB，超了停止镜像并打一条警告 |
+| 存不了时 | 报一次警告后停止镜像，写入照常成功（内存已提交） |
+| 换数据库名 | `createWorkerHost({ persistence: { database: 'x' } })`；传 `false` 关掉 |
+
+数据在浏览器本地（IndexedDB，按 origin 隔离），换设备、换浏览器、无痕窗口都不共享。要彻底清空：DevTools → Application → IndexedDB → 删 `dsh-web-vfs`。
+
 ## 前置条件
 
 - Cloudflare 账号开通 **Workers 付费版**（Containers 属于付费能力），并记下 Account ID。

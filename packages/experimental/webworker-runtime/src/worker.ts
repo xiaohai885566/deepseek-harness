@@ -71,6 +71,9 @@ self.addEventListener('message', (event: MessageEvent) => {
       alsCausality,
       image: data.image,
       overlays: data.overlays as string[],
+      // The preview is a real workspace: a reload must not take the user's
+      // model routes, settings and session logs with it.
+      persistence: {},
     })
     host = created
     for (const queued of pending) {

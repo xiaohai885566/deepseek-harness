@@ -34,6 +34,7 @@ import type { RequestListener } from './transport/synthetic-http.ts'
 import { TunnelServer, type TunnelPort } from './transport/tunnel.ts'
 import { inflateImage, inflateImageStream } from './storage/image-gzip.ts'
 import { loadVfsImage, loadVfsOverlay, MemoryVfs } from './storage/memory.ts'
+import { IndexedDbMutationSink, type VfsPersistenceOptions } from './storage/indexeddb.ts'
 import { setActiveVfs } from './storage/active.ts'
 import { setTextViewer } from './shell/process/xdg-open.ts'
 import { packPackageAssets } from './package-assets.ts'
@@ -124,6 +125,12 @@ export interface WorkerHostOptions {
   readonly unaryApiLane?: 'route' | 'direct'
   /** Channel back to the page; defaults to the worker global scope. */
   readonly channel?: TunnelPort
+  /**
+   * Mirror the user-owned subtrees (`home/`, `workspace/`) into IndexedDB and
+   * seed them back on the next boot. Off unless asked for: a host that mounts a
+   * throwaway image should stay throwaway. Pass `false` to be explicit.
+   */
+  readonly persistence?: Omit<VfsPersistenceOptions, 'root'> | false
 }
 
 /** The assembled worker host. */
@@ -192,13 +199,19 @@ export function createWorkerHost(options: WorkerHostOptions): WorkerHost {
         readImage(options.image),
         Promise.all((options.overlays ?? []).map(readImage)),
       ])
-      const mounted = loadVfsImage(bytes, root)
+      const persistence = options.persistence === undefined || options.persistence === false
+        ? undefined
+        : new IndexedDbMutationSink({ ...options.persistence, root })
+      const mounted = loadVfsImage(bytes, root, new MemoryVfs(persistence === undefined ? {} : { sink: persistence }))
       for (const overlay of overlays) loadVfsOverlay(overlay, root, mounted)
       // Belt and braces over the image's own empty-directory entries: a hand
       // -built image without them still boots.
       for (const directory of IMAGE_EMPTY_DIRECTORIES) {
         mounted.seedDirectory(join(root, directory.replace(/\/$/, '')))
       }
+      // Before anything reads a config file: the profile bundle and the model
+      // routes are restored state, not image state.
+      if (persistence !== undefined) await persistence.hydrate(mounted)
       setActiveVfs(mounted)
       vfs = mounted
 

@@ -31,6 +31,9 @@ const shellParserOnlyPlugin = {
   },
 }
 
+/** Source-relative path of the module exempt from the pi-ai proxy (see the plugin below). */
+const PI_AI_INSTALL_MODULE = 'src/pi-ai-install.ts'
+
 /**
  * Resolve the module proxy table at bundle time: every Node builtin or
  * replaced external the worker graph imports lands on its `./node/` proxy,
@@ -39,7 +42,11 @@ const shellParserOnlyPlugin = {
  */
 const moduleProxyPlugin = {
   name: 'dsh-module-proxies',
-  resolveId(source: string): string | null {
+  resolveId(source: string, importer?: string): string | null {
+    // `pi-ai-install.ts` is the one module that reaches the real
+    // `@earendil-works/pi-ai` graph: its proxy target is the stub serving the
+    // VFS loader, so rewriting these imports would have the stub import itself.
+    if (importer !== undefined && importer.endsWith(PI_AI_INSTALL_MODULE)) return null
     const exact = MODULE_PROXIES[source]
     if (exact !== undefined) return here(`./src/${exact.replace('./', '')}`)
     for (const [prefix, replacement] of Object.entries(MODULE_PROXY_PREFIXES)) {

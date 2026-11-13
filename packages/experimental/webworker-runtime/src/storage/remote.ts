@@ -325,14 +325,13 @@ export class RemoteVfsSync implements VfsMutationSink {
       pending.push({ kind: 'remove', path: entry.p })
     }
     if (pending.length === 0) return 0
-    for (let at = 0; at < pending.length; at += PUSH_CHUNK) {
-      try {
-        await this.post(pending.slice(at, at + PUSH_CHUNK))
-      } catch (error) {
-        console.warn('webworker vfs: reconcile upload failed:', error instanceof Error ? error.message : error)
-        return 0
-      }
-    }
+    // Route the sweep through the same queue every other write uses, so it
+    // inherits the backoff and the poison escape instead of giving up on the
+    // first refusal. A sweep that posts once and returns 0 on failure is barely
+    // better than not sweeping: the boot it runs on is exactly the boot after a
+    // store that was just failing.
+    this.queue.push(...pending)
+    await this.drain()
     return pending.length
   }
 

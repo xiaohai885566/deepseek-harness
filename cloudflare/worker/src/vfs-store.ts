@@ -129,10 +129,15 @@ async function readSnapshot(database: D1Database): Promise<{ revision: number; e
 /** Turn one wire mutation into the statements that apply it. */
 function statementsFor(database: D1Database, mutation: WireMutation, now: number): D1PreparedStatement | undefined {
   if (mutation.kind === 'remove') {
-    // A subtree delete is one statement: the sink reports the directory it
-    // removed, and every stored descendant goes with it.
-    return database.prepare('DELETE FROM vfs_entries WHERE path = ?1 OR path LIKE ?2')
-      .bind(mutation.path, `${mutation.path}/%`)
+    // SQLite refuses a LIKE pattern longer than 50 bytes with
+    // `7500 LIKE or GLOB pattern too complex`, and a stored session path is
+    // easily twice that, so a prefix match there fails on every retry rather
+    // than intermittently. `substr` has no such limit and is exact: the row's
+    // path either starts with the removed directory and a separator, or it is
+    // the path itself.
+    return database.prepare(
+      'DELETE FROM vfs_entries WHERE path = ?1 OR substr(path, 1, ?2) = ?3',
+    ).bind(mutation.path, mutation.path.length + 1, `${mutation.path}/`)
   }
   const directory = mutation.kind === 'mkdir' ? 1 : 0
   const mode = mutation.mode ?? (directory === 1 ? 0o755 : 0o644)

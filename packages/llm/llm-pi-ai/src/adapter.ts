@@ -338,12 +338,14 @@ export class PiAiAdapter extends LlmAdapter {
     return Promise.resolve().then(async () => {
       const snapshot = this.current()
       const profile = this.profileOf(snapshot, provider)
-      try { await this.config.resolveApiKey(provider, profile) }
-      catch (error) {
-        // A route whose named key does not resolve cannot serve a request, so it offers no models until the key is stored.
-        if (error instanceof LlmError && error.code === 'MISSING_CREDENTIAL') return []
-        throw error
-      }
+      // Resolve the route's key first, and let a failure escape. A route whose
+      // named key does not resolve cannot serve a request, but returning `[]`
+      // for it is indistinguishable from a provider that genuinely has no
+      // models: the catalog drops the empty group, the picker renders nothing,
+      // and the user sees an empty model list with no reason why. Throwing
+      // routes the message into the catalog's `failures` instead, where the
+      // picker shows it and names the credential reference to store.
+      await this.config.resolveApiKey(provider, profile)
       return snapshot.models.getModels(provider).map(model => ({
         provider,
         id: model.id,

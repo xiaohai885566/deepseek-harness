@@ -1197,15 +1197,16 @@ it.each([
   new LlmError('missing credential', 'MISSING_CREDENTIAL'),
   new LlmError('invalid credential', 'INVALID_CREDENTIAL'),
   new Error('credential storage failed'),
-])('distinguishes missing credentials from catalog failures: $message', async (error) => {
+])('surfaces every credential failure from listModels: $message', async (error) => {
   const adapter = new PiAiAdapter({
     profiles: () => resolveProfiles({ deepseek: { apiKeyEnv: 'PI_TEST_KEY' } }),
     resolveApiKey: () => Promise.reject(error),
     auth: memoryAuth(),
   })
-  if (error instanceof LlmError && error.code === 'MISSING_CREDENTIAL') {
-    expect(await adapter.listModels('deepseek')).toEqual([])
-  } else await expect(adapter.listModels('deepseek')).rejects.toBe(error)
+  // A route whose key does not resolve must never answer `[]`: the catalog
+  // drops zero-model groups, so an empty list reaches the picker as "this
+  // provider has no models" with no way to tell that the key is the problem.
+  await expect(adapter.listModels('deepseek')).rejects.toBe(error)
 })
 
 it('resolves the exact pi-ai image budget for screenshot coordinates', () => {

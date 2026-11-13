@@ -11614,6 +11614,9 @@ importers:
       string_decoder:
         specifier: ^1.3.0
         version: 1.3.0
+      yaml:
+        specifier: ^2.9.0
+        version: 2.9.0
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: workspace:~

@@ -18,6 +18,8 @@
 import { IndexedDbMutationSink, type VfsPersistenceOptions } from './indexeddb.ts'
 import type { StoredEntry } from './indexeddb.ts'
 import { fromBase64, RemoteVfsSync, type WireEntry } from './remote.ts'
+import { createCredentialsPath } from './policy.ts'
+import { mergeCredentialDocuments } from './credentials-merge.ts'
 import type { MemoryVfs } from './memory.ts'
 import type { VfsMutation, VfsMutationSink } from './types.ts'
 
@@ -30,6 +32,13 @@ import type { VfsMutation, VfsMutationSink } from './types.ts'
  * above the resolution of the comparison (milliseconds).
  */
 const FUTURE_STAMP_SLACK_MS = 60_000
+
+/** Owner-only mode the credential document must keep, or the store refuses to load it. */
+const CREDENTIAL_FILE_MODE = 0o600
+
+/** Text codec for the credential document, which is YAML and therefore text. */
+const textDecoder = new TextDecoder()
+const textEncoder = new TextEncoder()
 
 /** Persistence tuning as the host receives it, minus the root it computes itself. */
 export interface PersistenceOptions extends Omit<VfsPersistenceOptions, 'root'> {
@@ -91,6 +100,7 @@ export function persistenceSinks(options: PersistenceOptions, root: string): Per
       root,
       ...remoteOptions === undefined ? {} : remoteOptions,
     })
+  const credentials = createCredentialsPath(root)
   return {
     sink: remote === undefined ? local : new FanOutMutationSink([local, remote]),
     async restore(vfs: MemoryVfs): Promise<void> {
@@ -128,6 +138,12 @@ export function persistenceSinks(options: PersistenceOptions, root: string): Per
         await local.hydrate(vfs, entry => newer.localPaths.has(entry.path))
         void remote.pushAll(newer.local)
       }
+      // The credential store is one file holding two independently written
+      // sections, so per-path recency alone is wrong for it: a device that
+      // booted before the key was saved restamps the whole file every boot by
+      // rewriting `records`, wins on recency, and drops the `refs:` another
+      // device just wrote. Merge it as a document instead of as a blob.
+      await mergeCredentialFile(vfs, remote, local, credentials, shared, own)
     },
     ...remote === undefined ? {} : { reconcile: (vfs: MemoryVfs) => remote.reconcile(vfs) },
   }
@@ -143,6 +159,63 @@ interface NewerSplit {
   readonly sharedPaths: Set<string>
   /** Paths of {@link local}, for the browser's seeding filter. */
   readonly localPaths: Set<string>
+}
+
+/**
+ * Merge the credential document across both sides after the per-path seeding.
+ *
+ * Runs after every other path has been seeded, because it reads the document the
+ * seeding just materialized and then has to see both halves: the one the store
+ * holds and the one the browser mirror holds. Whatever the per-path verdict was,
+ * the file the app is about to read is the merge of the two, so a device whose
+ * copy happens to be newer cannot drop a section it never had. The merged text
+ * then goes back to both halves, which is what stops the next boot from
+ * re-deciding the same thing the other way.
+ * @param vfs - the mounted filesystem, already seeded.
+ * @param remote - the deployment's store.
+ * @param local - the browser mirror.
+ * @param path - absolute path of the credential document.
+ * @param shared - entries the store holds.
+ * @param own - entries the browser mirror holds.
+ */
+async function mergeCredentialFile(
+  vfs: MemoryVfs,
+  remote: RemoteVfsSync,
+  local: IndexedDbMutationSink,
+  path: string,
+  shared: readonly WireEntry[],
+  own: readonly StoredEntry[],
+): Promise<void> {
+  const stored = shared.find(entry => entry.p === path)
+  const mirrored = own.find(entry => entry.path === path)
+  const storedText = stored?.b === undefined ? undefined : textDecoder.decode(fromBase64(stored.b))
+  const mirroredText = mirrored?.bytes === undefined ? undefined : textDecoder.decode(mirrored.bytes)
+  let inFile: string | undefined
+  try {
+    const body = vfs.readFileSync(path)
+    inFile = typeof body === 'string' ? body : textDecoder.decode(body)
+  } catch {
+    inFile = undefined
+  }
+  // Whichever copy the per-path step already seeded is the one the merge should
+  // treat as current; the other side is the one it may be missing sections from.
+  const winner = inFile ?? storedText ?? mirroredText
+  if (winner === undefined) return
+  const loser = inFile === undefined ? mirroredText : storedText
+  if (loser === undefined) return
+  const merged = mergeCredentialDocuments(winner, loser)
+  // Unparsable on either side, or already identical: leave what was seeded.
+  if (merged === undefined || merged === winner) return
+  try {
+    vfs.writeFileSync(path, merged, { mode: CREDENTIAL_FILE_MODE })
+  } catch {
+    // The file is not writable in this mount; the seeded copy is still usable,
+    // and failing boot over a merge refinement would be worse than skipping it.
+    return
+  }
+  const bytes = textEncoder.encode(merged)
+  await local.absorb([{ path, bytes, mode: CREDENTIAL_FILE_MODE, directory: false, savedAt: Date.now() }])
+  await remote.pushAll([{ path, bytes, mode: CREDENTIAL_FILE_MODE, directory: false }])
 }
 
 /**

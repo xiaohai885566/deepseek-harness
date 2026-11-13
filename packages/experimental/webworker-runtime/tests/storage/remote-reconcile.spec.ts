@@ -84,4 +84,16 @@ describe('reconcile and the credential store', () => {
     const removed = calls.flatMap(call => call.mutations).filter(m => m.kind === 'remove')
     expect(removed.map(m => m.path)).toEqual([CREDENTIALS])
   })
+
+  it('survives a full boot: hydrate, then sweep', async () => {
+    const vfs = new MemoryVfs()
+    const { sync, calls } = store([credentialEntry])
+    const seeded = await sync.hydrate(vfs)
+    expect(seeded.map(entry => entry.path)).toContain(CREDENTIALS)
+    // The sweep runs after restore on every boot. The row was just seeded from
+    // the store, so it must come out of the sweep still there.
+    await sync.reconcile(vfs)
+    const removed = calls.flatMap(call => call.mutations).filter(m => m.kind === 'remove')
+    expect(removed).toEqual([])
+  })
 })

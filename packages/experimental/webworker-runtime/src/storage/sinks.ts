@@ -21,6 +21,16 @@ import { fromBase64, RemoteVfsSync, type WireEntry } from './remote.ts'
 import type { MemoryVfs } from './memory.ts'
 import type { VfsMutation, VfsMutationSink } from './types.ts'
 
+/**
+ * How far past the device's own clock a `savedAt` may sit before it is read as
+ * the residue of a clock that was once wrong rather than a real write.
+ *
+ * Two samples of the same clock differ by milliseconds, so this is generous:
+ * it only has to sit far below the drift worth correcting (minutes) and far
+ * above the resolution of the comparison (milliseconds).
+ */
+const FUTURE_STAMP_SLACK_MS = 60_000
+
 /** Persistence tuning as the host receives it, minus the root it computes itself. */
 export interface PersistenceOptions extends Omit<VfsPersistenceOptions, 'root'> {
   /**
@@ -157,12 +167,14 @@ interface NewerSplit {
  * @param shared - entries read from the deployment's store.
  * @param own - entries read from the browser's store.
  * @param offsetMs - device clock minus store clock, in milliseconds.
+ * @param nowMs - the device's clock at merge time, for spotting stale stamps.
  * @returns the split restore seeds from.
  */
 export function newerPerPath(
   shared: readonly WireEntry[],
   own: readonly StoredEntry[],
   offsetMs = 0,
+  nowMs = Date.now(),
 ): NewerSplit {
   const sharedByPath = new Map<string, WireEntry>()
   for (const entry of shared) sharedByPath.set(entry.p, entry)
@@ -194,7 +206,14 @@ export function newerPerPath(
     }
     const theirs = entry.u ?? 0
     const ours = mine.savedAt
-    if (ours === undefined || theirs > ours - offsetMs) sendShared()
+    // A stamp the device could not have written: `savedAt` is `Date.now()` at
+    // write time, so it can never exceed the device's own clock now. One that
+    // does was written while the clock ran fast and has since been corrected —
+    // the correction is exactly what makes it outrank everything, so it cannot
+    // be trusted. Slack absorbs the ordinary jitter of a clock that is merely
+    // being sampled twice.
+    const stale = ours !== undefined && ours > nowMs + FUTURE_STAMP_SLACK_MS
+    if (ours === undefined || stale || theirs > ours - offsetMs) sendShared()
     else {
       result.localPaths.add(mine.path)
       result.local.push(mine)

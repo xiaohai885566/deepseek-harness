@@ -37,9 +37,18 @@ function mirrored(bytes: string, savedAt: number): StoredEntry {
   }
 }
 
-/** Read the payload this merge would seed, so assertions name the winner. */
-function winner(shared: readonly WireEntry[], own: readonly StoredEntry[], offsetMs: number): string {
-  const split = newerPerPath(shared, own, offsetMs)
+/**
+ * Read the payload this merge would seed, so assertions name the winner.
+ * @param nowMs - the device's clock at merge time; the fixtures use a synthetic
+ * epoch, so they must say what "now" is rather than inherit the real clock.
+ */
+function winner(
+  shared: readonly WireEntry[],
+  own: readonly StoredEntry[],
+  offsetMs: number,
+  nowMs = Number.POSITIVE_INFINITY,
+): string {
+  const split = newerPerPath(shared, own, offsetMs, nowMs)
   if (split.sharedPaths.has(PATH)) return 'store'
   if (split.localPaths.has(PATH)) return 'device'
   return 'neither'
@@ -95,5 +104,27 @@ describe('newerPerPath under clock skew', () => {
 
   it('takes a path only the device holds', () => {
     expect(winner([], [mirrored('only-here', STORE_CLOCK)], 300_000)).toBe('device')
+  })
+})
+
+describe('newerPerPath against stamps the clock could not have written', () => {
+  const STORE_CLOCK = 1_800_000_000_000
+
+  it('ignores a stamp from a clock that has since been corrected', () => {
+    // Written while the device ran 5 minutes fast; NTP has since pulled it back,
+    // so the stamp now sits in the future of the device's own clock. Trusting it
+    // would let that one stale file outrank every later change, forever.
+    const shared = [stored('changed-elsewhere-later', STORE_CLOCK)]
+    const own = [mirrored('stale-from-fast-clock', STORE_CLOCK + 300_000)]
+    const split = newerPerPath(shared, own, 0, STORE_CLOCK)
+    expect(split.sharedPaths.has(PATH)).toBe(true)
+    expect(split.localPaths.has(PATH)).toBe(false)
+  })
+
+  it('keeps trusting a stamp within ordinary jitter of now', () => {
+    const shared = [stored('store-value', STORE_CLOCK)]
+    const own = [mirrored('device-value', STORE_CLOCK + 5_000)]
+    const split = newerPerPath(shared, own, 0, STORE_CLOCK)
+    expect(split.localPaths.has(PATH)).toBe(true)
   })
 })

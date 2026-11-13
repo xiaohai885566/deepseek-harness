@@ -16,7 +16,7 @@
  */
 import { IMAGE_HOME_DIRECTORY } from '../image-layout.ts'
 import { join } from '../module-system/posix-path.ts'
-import { ATOMIC_TEMP, createPersistPolicy, createReconcileScope, type PersistPolicy, type ReconcileScope } from './policy.ts'
+import { ATOMIC_TEMP, createCredentialsPath, createPersistPolicy, createReconcileScope, writeModeFor, type PersistPolicy, type ReconcileScope } from './policy.ts'
 import type { MemoryVfs } from './memory.ts'
 import type { StoredEntry } from './indexeddb.ts'
 import type { VfsMutation, VfsMutationSink } from './types.ts'
@@ -308,7 +308,7 @@ export class RemoteVfsSync implements VfsMutationSink {
         // a state change the other device needs to see.
         if (sameBytes(fromBase64(entry.b), bytes)) continue
       }
-      pending.push({ kind: 'write', path, mode: 0o644, bytes: toBase64(bytes) })
+      pending.push({ kind: 'write', path, mode: writeModeFor(this.root, path), bytes: toBase64(bytes) })
     }
     // The other direction: a row the filesystem does not have is a leftover of a
     // write that was half-mirrored (the temp sibling of a rename that never
@@ -367,6 +367,13 @@ export class RemoteVfsSync implements VfsMutationSink {
       for (const name of names) directory(join(path, name))
     }
     directory(join(this.root, IMAGE_HOME_DIRECTORY, 'storages'))
+    // The credential store is a single file rather than a subtree, so it is
+    // named here for the same reason the profile patches are. It is in `scope`,
+    // and a path in scope that this walk omits is indistinguishable from one the
+    // filesystem no longer has: the sweep at the bottom would delete it on every
+    // boot, which is exactly how a saved API key disappears on reload.
+    const credentials = createCredentialsPath(this.root)
+    if (vfs.existsSync(credentials) && this.persists(credentials)) found.push(credentials)
     const profiles = join(this.root, IMAGE_HOME_DIRECTORY, 'profiles')
     if (vfs.existsSync(profiles)) {
       let names: string[]

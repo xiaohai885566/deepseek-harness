@@ -130,3 +130,34 @@ export function createPersistPolicy(root: string): PersistPolicy {
 export function createReconcileScope(root: string): ReconcileScope {
   return rules(root).scope
 }
+
+/**
+ * The credential store's absolute path inside a filesystem mounted at `root`.
+ *
+ * The sweep scope judges this path, so the sweep must also be able to see it:
+ * `walk` visits the KV root and the profile patches by name rather than by
+ * prefix, and a row that `scope` judges but `walk` never visits reads as an
+ * orphan and is deleted on every boot — which empties the model picker after
+ * every reload, however often the key is re-entered. Exported rather than
+ * re-derived so the two cannot drift apart again.
+ * @param root - Virtual root the image is mounted at.
+ * @returns Absolute VFS path of the credential store.
+ */
+export function createCredentialsPath(root: string): string {
+  return join(root, IMAGE_HOME_DIRECTORY, CREDENTIALS_FILENAME)
+}
+
+/**
+ * The mode a mirrored write must carry, given the file it is mirroring.
+ *
+ * `reconcile` re-uploads a file whose stored bytes differ, and the credential
+ * store refuses to load at all unless it is owner-only (`assertOwnerOnly` aborts
+ * the plugin, which fails the whole boot). Every other path is a normal 0644, so
+ * this only special-cases the one file whose mode is load-bearing.
+ * @param root - Virtual root the image is mounted at.
+ * @param path - Absolute VFS path being mirrored.
+ * @returns The mode to record on the write mutation.
+ */
+export function writeModeFor(root: string, path: string): number {
+  return path === createCredentialsPath(root) ? 0o600 : 0o644
+}

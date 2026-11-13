@@ -212,6 +212,12 @@ export function createWorkerHost(options: WorkerHostOptions): WorkerHost {
       // Before anything reads a config file: the profile bundle and the model
       // routes are restored state, not image state.
       if (persistence !== undefined) await persistence.restore(mounted)
+      // Whatever the merge decided, the store can still be missing a path the
+      // browser has: a session that lost the rename half of an atomic write
+      // leaves the temp sibling and never the file, and nothing later re-reports
+      // it. One sweep closes that, and its result is deliberately not awaited —
+      // a slow or failing store must not hold up the boot.
+      if (persistence?.reconcile !== undefined) void persistence.reconcile(mounted).catch(() => {})
       setActiveVfs(mounted)
       vfs = mounted
 

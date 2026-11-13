@@ -43,6 +43,16 @@ export interface StoredEntry {
   mode: number
   /** Marks a directory, including one with no files in it. */
   directory: boolean
+  /**
+   * When this entry was written, in epoch milliseconds.
+   *
+   * Restore needs it to pick between the browser's copy and the deployment's:
+   * without a timestamp the only safe rule is "the deployment wins", and that
+   * throws away the model the user saved ten seconds before reloading while the
+   * store was still one batch behind. Absent on entries written before this
+   * field existed, which restore treats as "this device's copy is current".
+   */
+  savedAt?: number
 }
 
 /** Tuning for {@link IndexedDbMutationSink}. */
@@ -134,8 +144,9 @@ export class IndexedDbMutationSink implements VfsMutationSink {
       this.schedule()
       return
     }
+    const savedAt = Date.now()
     if (mutation.kind === 'mkdir') {
-      this.queue.push({ entry: { path: mutation.path, mode: mutation.mode, directory: true } })
+      this.queue.push({ entry: { path: mutation.path, mode: mutation.mode, directory: true, savedAt } })
       this.schedule()
       return
     }
@@ -147,7 +158,13 @@ export class IndexedDbMutationSink implements VfsMutationSink {
     this.totalBytes += mutation.bytes.byteLength
     // Copied: the filesystem keeps its own view of a buffer it may reuse.
     this.queue.push({
-      entry: { path: mutation.path, bytes: mutation.bytes.slice(), mode: mutation.mode, directory: false },
+      entry: {
+        path: mutation.path,
+        bytes: mutation.bytes.slice(),
+        mode: mutation.mode,
+        directory: false,
+        savedAt,
+      },
     })
     this.schedule()
   }
@@ -167,10 +184,12 @@ export class IndexedDbMutationSink implements VfsMutationSink {
    * files themselves. A stored entry whose directory no longer exists in the
    * image is still restored: user data outlives the build that created it.
    * @param vfs - The mounted filesystem to seed.
+   * @param accept - Restrict seeding to the entries this returns true for, so a
+   * restore can seed only the paths where this store holds the newer write.
    * @returns How many files were restored, so a caller can tell an empty store
    * from an unreachable one.
    */
-  async hydrate(vfs: MemoryVfs): Promise<number> {
+  async hydrate(vfs: MemoryVfs, accept?: (entry: StoredEntry) => boolean): Promise<number> {
     if (!IndexedDbMutationSink.supported) return 0
     let entries: StoredEntry[]
     try {
@@ -191,6 +210,7 @@ export class IndexedDbMutationSink implements VfsMutationSink {
       entries = entries.filter(entry => this.persists(entry.path))
       void this.forget(stale.map(entry => entry.path))
     }
+    if (accept !== undefined) entries = entries.filter(entry => accept(entry))
     if (entries.length === 0) return 0
     const depth = (path: string): number => path.split(SEP).length
     const directories = entries.filter(entry => entry.directory).sort((left, right) => depth(left.path) - depth(right.path))
@@ -257,13 +277,19 @@ export class IndexedDbMutationSink implements VfsMutationSink {
       const store = transaction.objectStore(STORE)
       for (const entry of kept) {
         if (entry.directory) {
-          store.put({ path: entry.path, mode: entry.mode, directory: true })
+          store.put({ path: entry.path, mode: entry.mode, directory: true, savedAt: entry.savedAt })
           continue
         }
         if (entry.bytes === undefined || entry.bytes.byteLength > this.maxFileBytes) continue
         if (this.totalBytes + entry.bytes.byteLength > this.maxTotalBytes) continue
         this.totalBytes += entry.bytes.byteLength
-        store.put({ path: entry.path, bytes: entry.bytes, mode: entry.mode, directory: false })
+        store.put({
+          path: entry.path,
+          bytes: entry.bytes,
+          mode: entry.mode,
+          directory: false,
+          savedAt: entry.savedAt,
+        })
       }
       await resolveTransaction(transaction)
     } catch (error) {

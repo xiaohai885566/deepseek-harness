@@ -16,7 +16,8 @@
  * @module @deepseek-ai/dsh-experimental-webworker-runtime/src/storage/sinks
  */
 import { IndexedDbMutationSink, type VfsPersistenceOptions } from './indexeddb.ts'
-import { RemoteVfsSync } from './remote.ts'
+import type { StoredEntry } from './indexeddb.ts'
+import { fromBase64, RemoteVfsSync, type WireEntry } from './remote.ts'
 import type { MemoryVfs } from './memory.ts'
 import type { VfsMutation, VfsMutationSink } from './types.ts'
 
@@ -58,6 +59,11 @@ export interface PersistencePlan {
   readonly sink: VfsMutationSink
   /** Seed the mounted filesystem from the most authoritative copy available. */
   restore(vfs: MemoryVfs): Promise<void>
+  /**
+   * Re-upload anything the store is missing, for a mirror that dropped an edge.
+   * Absent when this deployment has no shared store.
+   */
+  reconcile?(vfs: MemoryVfs): Promise<number>
 }
 
 /**
@@ -78,20 +84,110 @@ export function persistenceSinks(options: PersistenceOptions, root: string): Per
   return {
     sink: remote === undefined ? local : new FanOutMutationSink([local, remote]),
     async restore(vfs: MemoryVfs): Promise<void> {
-      if (remote !== undefined) {
-        const shared = await remote.hydrate(vfs)
-        if (shared.length > 0) {
-          // Keep the offline copy in step with the shared one, so a later boot
-          // without a network restores this workspace rather than an older one.
-          await local.absorb(shared)
-          return
-        }
+      if (remote === undefined) {
+        await local.hydrate(vfs)
+        return
       }
-      const restored = await local.hydrate(vfs)
-      if (remote !== undefined && restored > 0) {
-        const entries = await local.snapshot()
-        if (entries.length > 0) void remote.pushAll(entries)
+      const [shared, own] = await Promise.all([remote.read(), local.snapshot()])
+      if (shared === undefined) {
+        // Store unreachable: the browser's copy is the only one there is, and
+        // whatever it holds will be pushed up by the next mutation.
+        await local.hydrate(vfs)
+        return
+      }
+      const newer = newerPerPath(shared, own)
+      if (newer.local.length === 0 && newer.shared.length === 0) {
+        // The store answered but holds nothing: first boot after it was added.
+        // Seeding from the browser keeps the models and sessions the user
+        // already had instead of starting over from the image.
+        const restored = await local.hydrate(vfs)
+        if (restored > 0) {
+          const entries = await local.snapshot()
+          if (entries.length > 0) void remote.pushAll(entries)
+        }
+        return
+      }
+      // Seed only the winning side of each path. Seeding the whole store and
+      // then the whole browser copy would leave whichever ran second, which is
+      // how a store one batch behind used to erase a just-saved model.
+      if (newer.shared.length > 0) {
+        await remote.hydrate(vfs, entry => newer.sharedPaths.has(entry.path))
+        await local.absorb(newer.shared)
+      }
+      if (newer.local.length > 0) {
+        await local.hydrate(vfs, entry => newer.localPaths.has(entry.path))
+        void remote.pushAll(newer.local)
       }
     },
+    ...remote === undefined ? {} : { reconcile: (vfs: MemoryVfs) => remote.reconcile(vfs) },
   }
+}
+
+/** Which side of each path restore should believe. */
+interface NewerSplit {
+  /** Entries the deployment's store holds newer than the browser's copy. */
+  readonly shared: StoredEntry[]
+  /** Entries the browser holds newer than the deployment's copy. */
+  readonly local: StoredEntry[]
+  /** Paths of {@link shared}, for the store's own seeding filter. */
+  readonly sharedPaths: Set<string>
+  /** Paths of {@link local}, for the browser's seeding filter. */
+  readonly localPaths: Set<string>
+}
+
+/**
+ * Decide, per path, whether the deployment's copy or the browser's is current.
+ *
+ * A path only one side has is unambiguously that side's. A path both have is
+ * decided by {@link StoredEntry.savedAt}: the deployment stamps `updated_at` on
+ * every row, and the browser stamps on every write, so the later one is the
+ * write the user is looking at. Timestamps are compared only after checking
+ * both are present; an entry written before `savedAt` existed counts as current
+ * on the device it is on, because that is the copy whose author is sitting in
+ * front of it.
+ * @param shared - entries read from the deployment's store.
+ * @param own - entries read from the browser's store.
+ * @returns the split restore seeds from.
+ */
+export function newerPerPath(shared: readonly WireEntry[], own: readonly StoredEntry[]): NewerSplit {
+  const sharedByPath = new Map<string, WireEntry>()
+  for (const entry of shared) sharedByPath.set(entry.p, entry)
+  const ownByPath = new Map<string, StoredEntry>()
+  for (const entry of own) ownByPath.set(entry.path, entry)
+  const result: NewerSplit = { shared: [], local: [], sharedPaths: new Set(), localPaths: new Set() }
+  for (const entry of shared) {
+    const mine = ownByPath.get(entry.p)
+    const sendShared = (): void => {
+      const path = entry.p
+      result.sharedPaths.add(path)
+      const base: StoredEntry = {
+        path,
+        mode: entry.m,
+        directory: entry.d === 1,
+        ...entry.u === undefined ? {} : { savedAt: entry.u },
+      }
+      if (entry.d === 1 || entry.b === undefined) {
+        result.shared.push(base)
+        return
+      }
+      result.shared.push({ ...base, bytes: fromBase64(entry.b) })
+    }
+    if (mine === undefined) {
+      sendShared()
+      continue
+    }
+    const theirs = entry.u ?? 0
+    const ours = mine.savedAt
+    if (ours === undefined || theirs > ours) sendShared()
+    else {
+      result.localPaths.add(mine.path)
+      result.local.push(mine)
+    }
+  }
+  for (const entry of own) {
+    if (sharedByPath.has(entry.path)) continue
+    result.localPaths.add(entry.path)
+    result.local.push(entry)
+  }
+  return result
 }

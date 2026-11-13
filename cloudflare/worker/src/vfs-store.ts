@@ -59,6 +59,8 @@ interface WireEntry {
   readonly m: number
   /** Base64 body, files only. */
   readonly b?: string
+  /** Epoch milliseconds of the write this row holds; restore merges on it. */
+  readonly u?: number
 }
 
 /** Row shape of the entries table. */
@@ -117,7 +119,7 @@ async function readSnapshot(database: D1Database): Promise<{ revision: number; e
     readRevision(database),
   ])
   const entries: WireEntry[] = (rows.results ?? []).map((row) => {
-    const base: WireEntry = { p: row.path, d: row.directory === 1 ? 1 : 0, m: row.mode }
+    const base: WireEntry = { p: row.path, d: row.directory === 1 ? 1 : 0, m: row.mode, u: row.updated_at }
     if (row.directory === 1 || row.bytes === null) return base
     return { ...base, b: toBase64(new Uint8Array(row.bytes)) }
   })
@@ -161,6 +163,9 @@ async function applyMutations(
   const now = Date.now()
   const skipped: string[] = []
   const statements: D1PreparedStatement[] = []
+  // Parallel to `statements`, because a skipped mutation would otherwise shift
+  // every later index and blame the wrong path.
+  const owners: string[] = []
   for (const mutation of mutations) {
     const statement = statementsFor(database, mutation, now)
     if (statement === undefined) {
@@ -168,8 +173,30 @@ async function applyMutations(
       continue
     }
     statements.push(statement)
+    owners.push(mutation.path)
   }
-  if (statements.length > 0) await database.batch(statements)
+  // D1 occasionally drops a batch with a transient fault that surfaces as the
+  // Worker's opaque `error code: 1101`; one retry turns that into a no-op.
+  // A second failure falls back to the statements one by one, so one poisonous
+  // mutation cannot take an atomic rename down with it.
+  if (statements.length > 0) {
+    try {
+      await database.batch(statements)
+    } catch {
+      try {
+        await database.batch(statements)
+      } catch {
+        for (const [at, statement] of statements.entries()) {
+          try {
+            await statement.run()
+          } catch {
+            const owner = owners[at]
+            if (owner !== undefined) skipped.push(owner)
+          }
+        }
+      }
+    }
+  }
   const revision = (await readRevision(database)) + 1
   await database.prepare(
     'INSERT INTO vfs_meta (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = ?2',
@@ -193,6 +220,25 @@ export async function handleVfs(request: Request, url: URL, env: VfsEnv): Promis
     return json({ error: 'this deployment has no VFS_DB binding, so cross-device sync is off' }, 503)
   }
   const verb = url.pathname.slice(VFS_PATH.length)
+  // A D1 refusal otherwise leaves Cloudflare's opaque `error code: 1101` in the
+  // page console: no verb, no statement, no reason. Answering with the message
+  // keeps a failed mirror diagnosable instead of mysterious.
+  try {
+    return await route(database, request, url, verb)
+  } catch (error) {
+    return json({ error: error instanceof Error ? error.message : String(error), verb }, 500)
+  }
+}
+
+/**
+ * Dispatch one already-authorized `/__vfs/` verb.
+ * @param database - the D1 database.
+ * @param request - the gated request.
+ * @param url - its URL.
+ * @param verb - the path after {@link VFS_PATH}.
+ * @returns the verb's answer.
+ */
+async function route(database: D1Database, request: Request, url: URL, verb: string): Promise<Response> {
   if (verb === 'snapshot' && request.method === 'GET') {
     return json(await readSnapshot(database))
   }

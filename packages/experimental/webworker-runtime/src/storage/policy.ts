@@ -58,16 +58,19 @@ function rules(root: string): { persists: PersistPolicy; scope: ReconcileScope }
     // otherwise forget every workspace the user created.
     storages,
   ]
-  // The KV writes a `<uuid>.tmp` sibling and renames it into place. The rename
-  // is the commit, so the sibling is never the user's data — mirroring it only
-  // leaves a half-written registry in the store, and a store holding that temp
-  // file but not the renamed target is exactly the state that reads back as
-  // "my workspace is gone".
-  const storageTemp = new RegExp(`^${literal(storages)}/[^/]+\\.tmp$`)
+  // Every atomic write in this codebase commits by rename: storage-json writes
+  // `.${uuid}.tmp`, `writeFileAtomic` writes `<name>.${hex}.tmp`, and the session
+  // log writes `<name>.${hex}.tmp`. The `.tmp` half is never the user's data —
+  // mirroring it only leaves a half-written copy in the store, and a store
+  // holding that temp file but not the renamed target is exactly the state that
+  // reads back as "my workspace is gone". A tab closed mid-write leaves the
+  // sibling behind in the filesystem too, so this skips any segment, at any
+  // depth: nothing the user owns is named `*.tmp`.
+  const atomicTemp = /(?:^|\/)[^/]*\.tmp$/
   const userPatch = new RegExp(`^${literal(join(root, IMAGE_HOME_DIRECTORY, 'profiles'))}/[^/]+/cordis\\.patch\\.yml$`)
   return {
     persists: (path: string): boolean => {
-      if (storageTemp.test(path)) return false
+      if (atomicTemp.test(path)) return false
       if (userPatch.test(path)) return true
       return prefixes.some(prefix => path === prefix || path.startsWith(`${prefix}${SEP}`))
     },

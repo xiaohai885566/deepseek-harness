@@ -316,6 +316,9 @@ export class RemoteVfsSync implements VfsMutationSink {
     // already deleted, so it goes.
     const present = new Set(this.walk(vfs))
     for (const entry of stored) {
+      // `scope` decides which stored rows this sweep may judge; presence comes
+      // from the persists-filtered walk, so a `.tmp` row has no live file and is
+      // removed here just like any other leftover.
       if (!this.scope(entry.p)) continue
       if (present.has(entry.p)) continue
       pending.push({ kind: 'remove', path: entry.p })
@@ -349,7 +352,10 @@ export class RemoteVfsSync implements VfsMutationSink {
   private walk(vfs: MemoryVfs): string[] {
     const found: string[] = []
     const directory = (path: string): void => {
-      if (!this.scope(path)) return
+      // Read set and presence set are the same: what the user owns. A `.tmp`
+      // sibling is in neither, so it is never uploaded and its stored row reads
+      // as an orphan below.
+      if (!this.persists(path)) return
       if (!vfs.existsSync(path)) return
       found.push(path)
       let names: string[]
@@ -371,7 +377,7 @@ export class RemoteVfsSync implements VfsMutationSink {
       }
       for (const name of names) {
         const patch = join(profiles, name, 'cordis.patch.yml')
-        if (vfs.existsSync(patch) && this.scope(patch)) found.push(patch)
+        if (vfs.existsSync(patch) && this.persists(patch)) found.push(patch)
       }
     }
     return found

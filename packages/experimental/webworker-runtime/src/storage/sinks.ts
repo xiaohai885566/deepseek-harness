@@ -95,7 +95,7 @@ export function persistenceSinks(options: PersistenceOptions, root: string): Per
         await local.hydrate(vfs)
         return
       }
-      const newer = newerPerPath(shared, own)
+      const newer = newerPerPath(shared, own, remote.clockOffsetMs)
       if (newer.local.length === 0 && newer.shared.length === 0) {
         // The store answered but holds nothing: first boot after it was added.
         // Seeding from the browser keeps the models and sessions the user
@@ -139,17 +139,31 @@ interface NewerSplit {
  * Decide, per path, whether the deployment's copy or the browser's is current.
  *
  * A path only one side has is unambiguously that side's. A path both have is
- * decided by {@link StoredEntry.savedAt}: the deployment stamps `updated_at` on
- * every row, and the browser stamps on every write, so the later one is the
- * write the user is looking at. Timestamps are compared only after checking
- * both are present; an entry written before `savedAt` existed counts as current
- * on the device it is on, because that is the copy whose author is sitting in
- * front of it.
+ * decided by the write time: the deployment stamps `updated_at` on every row,
+ * and the browser stamps on every write, so the later one is the write the user
+ * is looking at. Timestamps are compared only after checking both are present;
+ * an entry written before `savedAt` existed counts as current on the device it
+ * is on, because that is the copy whose author is sitting in front of it.
+ *
+ * The two stamps come from **different clocks**. The deployment's is the
+ * Worker's `Date.now()`; the browser's is the device's. Comparing them raw means
+ * a phone whose clock runs five minutes fast outranks every row and pushes its
+ * stale copy over a key another device just changed — the exact failure
+ * {@link StoredEntry.savedAt} was added to prevent, reintroduced through the
+ * clock. `offsetMs` is the device-minus-store difference the snapshot reports;
+ * subtracting it puts both stamps on the store's clock before the comparison,
+ * and adding it back keeps the local mirror uniformly in device time so the next
+ * boot compares like with like.
  * @param shared - entries read from the deployment's store.
  * @param own - entries read from the browser's store.
+ * @param offsetMs - device clock minus store clock, in milliseconds.
  * @returns the split restore seeds from.
  */
-export function newerPerPath(shared: readonly WireEntry[], own: readonly StoredEntry[]): NewerSplit {
+export function newerPerPath(
+  shared: readonly WireEntry[],
+  own: readonly StoredEntry[],
+  offsetMs = 0,
+): NewerSplit {
   const sharedByPath = new Map<string, WireEntry>()
   for (const entry of shared) sharedByPath.set(entry.p, entry)
   const ownByPath = new Map<string, StoredEntry>()
@@ -164,7 +178,9 @@ export function newerPerPath(shared: readonly WireEntry[], own: readonly StoredE
         path,
         mode: entry.m,
         directory: entry.d === 1,
-        ...entry.u === undefined ? {} : { savedAt: entry.u },
+        // Rewritten into device time: everything this function seeds into the
+        // browser store has to speak the clock that store stamps with.
+        ...entry.u === undefined ? {} : { savedAt: entry.u + offsetMs },
       }
       if (entry.d === 1 || entry.b === undefined) {
         result.shared.push(base)
@@ -178,7 +194,7 @@ export function newerPerPath(shared: readonly WireEntry[], own: readonly StoredE
     }
     const theirs = entry.u ?? 0
     const ours = mine.savedAt
-    if (ours === undefined || theirs > ours) sendShared()
+    if (ours === undefined || theirs > ours - offsetMs) sendShared()
     else {
       result.localPaths.add(mine.path)
       result.local.push(mine)

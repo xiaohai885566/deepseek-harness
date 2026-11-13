@@ -158,6 +158,7 @@ export class RemoteVfsSync implements VfsMutationSink {
   private failures = 0
   private warned = false
   private reportedSize = false
+  private offsetMs = 0
 
   /**
    * @param options - root, endpoint, transport and caps.
@@ -251,6 +252,20 @@ export class RemoteVfsSync implements VfsMutationSink {
   }
 
   /**
+   * How far this device's clock runs ahead of the store's, in milliseconds.
+   *
+   * Both sides stamp their writes, and restore compares the two, so the stamps
+   * are only meaningful after this correction: the store's `updated_at` comes
+   * from the Worker's clock, a mirrored entry's `savedAt` from whatever the
+   * device's settings say. Measured against the `now` the snapshot publishes,
+   * and refreshed on every read. Zero until a read succeeds, which degrades to
+   * the old raw comparison rather than to a wrong one.
+   */
+  get clockOffsetMs(): number {
+    return this.offsetMs
+  }
+
+  /**
    * Read the store's entries without seeding anything.
    * @returns the stored entries with their write times, or undefined when the
    * store is unreachable — the caller needs that difference to decide whether
@@ -258,9 +273,16 @@ export class RemoteVfsSync implements VfsMutationSink {
    */
   async read(): Promise<readonly WireEntry[] | undefined> {
     try {
+      const started = Date.now()
       const response = await this.transport(this.url('snapshot'), { credentials: 'same-origin' })
       if (!response.ok) return undefined
-      const body = await response.json() as { entries?: readonly WireEntry[] }
+      const body = await response.json() as { entries?: readonly WireEntry[], now?: number }
+      if (typeof body.now === 'number' && Number.isFinite(body.now)) {
+        // Midpoint of the round trip is the fairest estimate of "now" on the
+        // store's clock; the half-RTT skew is far below the gaps that matter
+        // here, and an unmeasurable clock would be worse than an approximate one.
+        this.offsetMs = Date.now() - (body.now + Math.floor((Date.now() - started) / 2))
+      }
       return body.entries ?? []
     } catch (error) {
       console.warn('webworker vfs: cross-device snapshot unavailable:', error instanceof Error ? error.message : error)

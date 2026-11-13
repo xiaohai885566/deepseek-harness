@@ -109,10 +109,17 @@ async function readRevision(database: D1Database): Promise<number> {
  * The client compares revisions only for diagnostics; it seeds unconditionally,
  * because a boot with no snapshot is indistinguishable from a boot whose
  * snapshot the network dropped.
+ *
+ * `now` is the clock every `u` in this document was stamped against. The client
+ * merges this snapshot against its own mirror and both sides stamp their writes,
+ * so without the reference clock the merge compares two unrelated clocks — a
+ * device set minutes fast outranks every row and pushes its stale copy over a
+ * change another device just made. Publishing the clock lets the client
+ * normalize before comparing instead of trusting arithmetic on raw numbers.
  * @param database - the D1 database.
  * @returns the snapshot document.
  */
-async function readSnapshot(database: D1Database): Promise<{ revision: number; entries: WireEntry[] }> {
+async function readSnapshot(database: D1Database): Promise<{ revision: number; now: number; entries: WireEntry[] }> {
   const [rows, revision] = await Promise.all([
     database.prepare('SELECT path, directory, mode, bytes, updated_at FROM vfs_entries ORDER BY path')
       .all<EntryRow>(),
@@ -123,7 +130,7 @@ async function readSnapshot(database: D1Database): Promise<{ revision: number; e
     if (row.directory === 1 || row.bytes === null) return base
     return { ...base, b: toBase64(new Uint8Array(row.bytes)) }
   })
-  return { revision, entries }
+  return { revision, now: Date.now(), entries }
 }
 
 /** Turn one wire mutation into the statements that apply it. */

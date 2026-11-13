@@ -40,6 +40,17 @@ export type PersistPolicy = (path: string) => boolean
 export type ReconcileScope = (path: string) => boolean
 
 /**
+ * The credential store's filename, under the home directory.
+ *
+ * `@deepseek-ai/dsh-credentials-local` exports this constant, but that package is
+ * a host-side dependency this one does not carry, and the value is a fixed part
+ * of the on-disk layout rather than something that varies by deployment: the
+ * local provider resolves `$DSH_HOME/.credentials.yaml`. Duplicating it here keeps
+ * the dependency graph as it is.
+ */
+const CREDENTIALS_FILENAME = '.credentials.yaml'
+
+/**
  * The basename every atomic write leaves behind before it renames into place.
  *
  * `storage-json` writes `.${uuid}.tmp`, `writeFileAtomic` writes
@@ -63,12 +74,20 @@ function literal(path: string): string {
  */
 function rules(root: string): { persists: PersistPolicy; scope: ReconcileScope } {
   const storages = join(root, IMAGE_HOME_DIRECTORY, 'storages')
+  // The credential store. `llm-pi-ai` drops a route from the model picker when
+  // its `apiKeyEnv` does not resolve (`listModels` returns an empty array for
+  // `MISSING_CREDENTIAL`), so a key that lives only in browser memory reads back
+  // after a reload as "no models" while the provider itself is still configured.
+  const credentials = join(root, IMAGE_HOME_DIRECTORY, CREDENTIALS_FILENAME)
   const prefixes = [
     join(root, 'workspace'),
     join(root, IMAGE_HOME_DIRECTORY, 'sessions'),
     // Durable KV: the workspace registry lives here, so a reload would
     // otherwise forget every workspace the user created.
     storages,
+    // Without this, every stored API key is gone on the next boot and the
+    // model picker silently empties.
+    credentials,
   ]
   // Every atomic write in this codebase commits by rename: storage-json writes
   // `.${uuid}.tmp`, `writeFileAtomic` writes `<name>.${hex}.tmp`, and the session
@@ -88,6 +107,7 @@ function rules(root: string): { persists: PersistPolicy; scope: ReconcileScope }
     },
     scope: (path: string): boolean => {
       if (userPatch.test(path)) return true
+      if (path === credentials) return true
       return path === storages || path.startsWith(`${storages}${SEP}`)
     },
   }

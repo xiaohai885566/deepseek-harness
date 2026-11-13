@@ -39,6 +39,18 @@ export type PersistPolicy = (path: string) => boolean
  */
 export type ReconcileScope = (path: string) => boolean
 
+/**
+ * The basename every atomic write leaves behind before it renames into place.
+ *
+ * `storage-json` writes `.${uuid}.tmp`, `writeFileAtomic` writes
+ * `<name>.${hex}.tmp`, and the session log writes `<name>.${hex}.tmp`. Nothing a
+ * user owns ends in `.tmp`, so a path matching this is never durable state: it is
+ * either a write in flight or the debris of one that was interrupted. Excluded
+ * from the mirror, from restore, and deleted by the boot sweep wherever it is
+ * found — including inside `sessions/`, which the sweep otherwise leaves alone.
+ */
+export const ATOMIC_TEMP = /(?:^|\/)[^/]*\.tmp$/
+
 /** Escape one literal path so it can stand inside a regular expression. */
 function literal(path: string): string {
   return path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -66,7 +78,7 @@ function rules(root: string): { persists: PersistPolicy; scope: ReconcileScope }
   // reads back as "my workspace is gone". A tab closed mid-write leaves the
   // sibling behind in the filesystem too, so this skips any segment, at any
   // depth: nothing the user owns is named `*.tmp`.
-  const atomicTemp = /(?:^|\/)[^/]*\.tmp$/
+  const atomicTemp = ATOMIC_TEMP
   const userPatch = new RegExp(`^${literal(join(root, IMAGE_HOME_DIRECTORY, 'profiles'))}/[^/]+/cordis\\.patch\\.yml$`)
   return {
     persists: (path: string): boolean => {

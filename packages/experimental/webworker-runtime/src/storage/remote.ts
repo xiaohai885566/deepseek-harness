@@ -16,7 +16,7 @@
  */
 import { IMAGE_HOME_DIRECTORY } from '../image-layout.ts'
 import { join } from '../module-system/posix-path.ts'
-import { createPersistPolicy, createReconcileScope, type PersistPolicy, type ReconcileScope } from './policy.ts'
+import { ATOMIC_TEMP, createPersistPolicy, createReconcileScope, type PersistPolicy, type ReconcileScope } from './policy.ts'
 import type { MemoryVfs } from './memory.ts'
 import type { StoredEntry } from './indexeddb.ts'
 import type { VfsMutation, VfsMutationSink } from './types.ts'
@@ -316,10 +316,11 @@ export class RemoteVfsSync implements VfsMutationSink {
     // already deleted, so it goes.
     const present = new Set(this.walk(vfs))
     for (const entry of stored) {
-      // `scope` decides which stored rows this sweep may judge; presence comes
-      // from the persists-filtered walk, so a `.tmp` row has no live file and is
-      // removed here just like any other leftover.
-      if (!this.scope(entry.p)) continue
+      // `scope` decides which stored rows this sweep may judge, and presence
+      // comes from the persists-filtered walk, so a `.tmp` row has no live file
+      // and is removed like any other leftover. A temp row is judged wherever it
+      // sits: `sessions/` is otherwise out of scope, but its debris is not data.
+      if (!this.scope(entry.p) && !ATOMIC_TEMP.test(entry.p)) continue
       if (present.has(entry.p)) continue
       pending.push({ kind: 'remove', path: entry.p })
     }
